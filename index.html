@@ -530,11 +530,20 @@ function spawnSword() {
     len: (60 + Math.random() * 90) * DPR, hue: 40 + Math.random() * 15, a: 0.9
   });
 }
+let lastOpenT = {}, lastToggleT = 0;
 function tientonUpdate(dt) {
   flash = Math.max(0, flash - dt * 1.2);
-  // thâu thiên địa: xòe ✋ rồi nắm ✊
+  // thâu thiên địa: xòe ✋ rồi nắm ✊ — bắt theo CỬA SỔ THỜI GIAN
+  // (giữa xòe và nắm luôn có frame trung gian nên không thể so 2 frame liền kề)
+  const now = performance.now();
   for (const h of hands) {
-    if (prevGesture[h.label] === 'open' && h.gesture === 'fist') { togglePhase(); break; }
+    if (h.gesture === 'open') lastOpenT[h.label] = now;
+    if (h.gesture === 'fist'
+        && now - (lastOpenT[h.label] || 0) < 800     // vừa xòe trong 0.8s trước đó
+        && now - lastToggleT > 1500) {               // chống toggle liên tục
+      lastToggleT = now; lastOpenT[h.label] = 0;
+      togglePhase(); break;
+    }
   }
   if (phase !== 'scene') return;
   // rồng sau ngai thở lửa liên tục (2 miệng rồng trong ảnh nền)
