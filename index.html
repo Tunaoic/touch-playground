@@ -370,16 +370,15 @@ function thereminDraw(dt) {
 
 // ================= MODE: Tiên Tôn =================
 const bgImg = new Image();
-bgImg.src = 'assets/desk_web.jpg';
+bgImg.src = 'assets/desk2_web.jpg';
 const personCv = document.createElement('canvas');
 const pctx = personCv.getContext('2d');
 let segReady = false, segBusy = false, seg = null;
 // anchor ngai vàng trong ảnh 1920x1080 (tâm chỗ ngồi) + cỡ người
-const THRONE = { x: 0.528, y: 0.488, h: 0.16 }; // ngồi vào ghế sau bàn (desk_bg)
+const THRONE = { x: 0.508, y: 0.416, h: 0.17 }; // ngồi vào ghế đen trước ngai (desk_bg2)
 // các mảng cảnh vẽ ĐÈ lên người để người "ngồi sau bàn": mặt bàn+hộc tủ, màn hình, ly cà phê
 const DESK_OVERLAYS = [
-  { x0: 0.385, y0: 0.548, x1: 0.675, y1: 0.800 },  // thân bàn + hộc tủ
-  { x0: 0.398, y0: 0.508, x1: 0.462, y1: 0.556 },  // ly cà phê
+  { x0: 0.390, y0: 0.475, x1: 0.615, y1: 0.650 },  // mặt bàn + hộc tủ (desk_bg2)
 ];
 let swords = [], mists = [], auraT = 0;
 let phase = 'normal', flash = 0, sceneT = 0, frameNo = 0; // normal = video thường, scene = thiên giới
@@ -417,8 +416,8 @@ function ensureSeg() {
 }
 // miệng 2 con rồng vàng trong ảnh nền (toạ độ tỉ lệ màn hình) + hướng phun
 const DRAGON_MOUTHS = [
-  { x: 0.425, y: 0.16, dx: 0.8, dy: 0.6 },    // rồng trái phun xuống-phải
-  { x: 0.63, y: 0.155, dx: -0.8, dy: 0.6 },   // rồng phải phun xuống-trái
+  { x: 0.305, y: 0.10, dx: 0.8, dy: 0.5 },    // rồng trái phun xuống-phải
+  { x: 0.665, y: 0.10, dx: -0.8, dy: 0.5 },   // rồng phải phun xuống-trái
 ];
 // chim hạc tiên bay lượn
 let cranes = [];
