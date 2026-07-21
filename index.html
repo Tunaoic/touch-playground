@@ -375,11 +375,10 @@ const personCv = document.createElement('canvas');
 const pctx = personCv.getContext('2d');
 let segReady = false, segBusy = false, seg = null;
 // anchor ngai vàng trong ảnh 1920x1080 (tâm chỗ ngồi) + cỡ người
-const THRONE = { x: 0.528, y: 0.505, h: 0.22 }; // ngồi vào ghế sau bàn (desk_bg)
+const THRONE = { x: 0.528, y: 0.488, h: 0.16 }; // ngồi vào ghế sau bàn (desk_bg)
 // các mảng cảnh vẽ ĐÈ lên người để người "ngồi sau bàn": mặt bàn+hộc tủ, màn hình, ly cà phê
 const DESK_OVERLAYS = [
   { x0: 0.385, y0: 0.548, x1: 0.675, y1: 0.800 },  // thân bàn + hộc tủ
-  { x0: 0.535, y0: 0.450, x1: 0.660, y1: 0.556 },  // màn hình + loa
   { x0: 0.398, y0: 0.508, x1: 0.462, y1: 0.556 },  // ly cà phê
 ];
 let swords = [], mists = [], auraT = 0;
@@ -396,11 +395,13 @@ function togglePhase() {
 function ensureSeg() {
   if (seg) return;
   seg = new SelfieSegmentation({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation/${f}` });
-  seg.setOptions({ modelSelection: 0 }); // model nhẹ, đỡ lag
+  seg.setOptions({ modelSelection: 1 }); // model xịn: cắt nền sạch, không lọt tường nhà
   seg.onResults(r => {
     personCv.width = r.image.width; personCv.height = r.image.height;
     pctx.clearRect(0, 0, personCv.width, personCv.height);
+    pctx.filter = 'blur(3px)';
     pctx.drawImage(r.segmentationMask, 0, 0);
+    pctx.filter = 'none';
     pctx.globalCompositeOperation = 'source-in';
     pctx.drawImage(r.image, 0, 0);
     // mép dưới fade mờ dần để không bị cắt vuông
