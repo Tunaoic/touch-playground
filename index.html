@@ -92,7 +92,20 @@ function parseHand(lm, label) {
 
 // ================= Shared particles =================
 let parts = []; // {x,y,vx,vy,life,decay,size,hue,grav,add}
-function emit(o) { parts.push({ vx:0, vy:0, life:1, decay:1.5, size:2.5, hue:30, grav:0, add:true, ...o }); }
+function makeGlow(hue) {
+  const c = document.createElement('canvas'); c.width = c.height = 64;
+  const g = c.getContext('2d').createRadialGradient(32, 32, 0, 32, 32, 32);
+  g.addColorStop(0, `hsl(${hue} 100% 92%)`);
+  g.addColorStop(0.35, `hsl(${hue} 100% 65%)`);
+  g.addColorStop(1, `hsl(${hue} 100% 50% / 0)`);
+  const cc = c.getContext('2d'); cc.fillStyle = g; cc.fillRect(0, 0, 64, 64);
+  return c;
+}
+const glowWarm = makeGlow(32), glowCool = makeGlow(205);
+function emit(o) {
+  if (parts.length > 320) parts.shift();     // trần số hạt
+  parts.push({ vx:0, vy:0, life:1, decay:1.5, size:2.5, hue:30, grav:0, add:true, ...o });
+}
 function drawParts(dt) {
   ctx.globalCompositeOperation = 'lighter';
   for (const p of parts) {
@@ -100,12 +113,9 @@ function drawParts(dt) {
     p.x += p.vx * dt * 60; p.y += p.vy * dt * 60; p.vy += p.grav * dt * 60;
     if (p.life <= 0) continue;
     ctx.globalAlpha = Math.max(0, p.life);
-    ctx.fillStyle = `hsl(${p.hue} 100% 65%)`;
-    ctx.shadowColor = `hsl(${p.hue} 100% 55%)`;
-    ctx.shadowBlur = 10 * DPR;
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, p.size * DPR * p.life, 0, Math.PI * 2);
-    ctx.fill();
+    const spr = p.hue < 120 ? glowWarm : glowCool;
+    const r = p.size * DPR * p.life * 3;
+    ctx.drawImage(spr, p.x - r, p.y - r, r * 2, r * 2);
   }
   parts = parts.filter(p => p.life > 0);
   ctx.globalAlpha = 1; ctx.shadowBlur = 0;
@@ -386,7 +396,7 @@ function togglePhase() {
 function ensureSeg() {
   if (seg) return;
   seg = new SelfieSegmentation({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation/${f}` });
-  seg.setOptions({ modelSelection: 1 });
+  seg.setOptions({ modelSelection: 0 }); // model nhẹ, đỡ lag
   seg.onResults(r => {
     personCv.width = r.image.width; personCv.height = r.image.height;
     pctx.clearRect(0, 0, personCv.width, personCv.height);
@@ -580,8 +590,8 @@ function tientonDraw() {
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';
     ctx.translate(rx, ry);
-    for (let i = 0; i < 10; i++) {
-      const a = sceneT * 0.12 + (i / 10) * Math.PI * 2;
+    for (let i = 0; i < 6; i++) {
+      const a = sceneT * 0.12 + (i / 6) * Math.PI * 2;
       const grad = ctx.createLinearGradient(0, 0, Math.cos(a) * dh * 0.7, Math.sin(a) * dh * 0.7);
       grad.addColorStop(0, 'rgba(255,220,140,0.10)'); grad.addColorStop(1, 'rgba(255,220,140,0)');
       ctx.fillStyle = grad;
@@ -732,18 +742,27 @@ mpHands.onResults(res => {
     parseHand(lm, res.multiHandedness?.[i]?.label || String(i)));
   // keep prevGesture from render loop; update handled there
 });
+let handsBusy = false, handsBusyT = 0, segBusyT = 0;
+function sendHands(now) {
+  if (handsBusy && now - handsBusyT < 2000) return;   // watchdog: kẹt >2s thì gửi lại
+  handsBusy = true; handsBusyT = now;
+  mpHands.send({ image: video }).catch(() => {}).finally(() => { handsBusy = false; });
+}
+function sendSeg(now) {
+  if (!seg) return;
+  if (segBusy && now - segBusyT < 2000) return;
+  segBusy = true; segBusyT = now;
+  seg.send({ image: video }).catch(() => {}).finally(() => { segBusy = false; });
+}
 const camera = new Camera(video, {
   onFrame: async () => {
+    const now = performance.now();
     if (mode.key === 'tienton' && phase === 'scene') {
-      // trong triều: xen kẽ tách người / track tay (nhận ✋→✊ hoàn tục)
+      // trong triều: xen kẽ tách người / track tay — không await để camera không bao giờ treo
       frameNo++;
-      if (frameNo % 2 === 0) {
-        if (seg && !segBusy) { segBusy = true; await seg.send({ image: video }); }
-      } else {
-        await mpHands.send({ image: video });
-      }
+      if (frameNo % 2 === 0) sendSeg(now); else sendHands(now);
     } else {
-      await mpHands.send({ image: video });
+      sendHands(now);
     }
   },
   width: 640, height: 480
