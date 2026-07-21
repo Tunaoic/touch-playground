@@ -365,7 +365,13 @@ const personCv = document.createElement('canvas');
 const pctx = personCv.getContext('2d');
 let segReady = false, segBusy = false, seg = null;
 // anchor ngai vàng trong ảnh 1920x1080 (tâm chỗ ngồi) + cỡ người
-const THRONE = { x: 0.49, y: 0.45, h: 0.20 }; // toạ độ mặt bàn trong desk_bg
+const THRONE = { x: 0.528, y: 0.505, h: 0.22 }; // ngồi vào ghế sau bàn (desk_bg)
+// các mảng cảnh vẽ ĐÈ lên người để người "ngồi sau bàn": mặt bàn+hộc tủ, màn hình, ly cà phê
+const DESK_OVERLAYS = [
+  { x0: 0.385, y0: 0.548, x1: 0.675, y1: 0.800 },  // thân bàn + hộc tủ
+  { x0: 0.535, y0: 0.450, x1: 0.660, y1: 0.556 },  // màn hình + loa
+  { x0: 0.398, y0: 0.508, x1: 0.462, y1: 0.556 },  // ly cà phê
+];
 let swords = [], mists = [], auraT = 0;
 let phase = 'normal', flash = 0, sceneT = 0, frameNo = 0; // normal = video thường, scene = thiên giới
 // xòe ✋ rồi nắm ✊ = độ kiếp / hoàn tục
@@ -607,6 +613,13 @@ function tientonDraw() {
       ctx.fillStyle = 'rgba(255,230,170,.85)'; ctx.font = `${16 * DPR}px -apple-system`;
       ctx.textAlign = 'center';
       ctx.fillText('… đang triệu hồi chân thân …', tx, ty);
+    }
+    // bàn/màn hình/ly cà phê đè lên người -> người ngồi SAU bàn
+    const iw = bgImg.naturalWidth, ih = bgImg.naturalHeight;
+    for (const o of DESK_OVERLAYS) {
+      ctx.drawImage(bgImg,
+        o.x0 * iw, o.y0 * ih, (o.x1 - o.x0) * iw, (o.y1 - o.y0) * ih,
+        ox + dw * o.x0, oy + dh * o.y0, dw * (o.x1 - o.x0), dh * (o.y1 - o.y0));
     }
     // 3b. hạc tiên bay lượn
     drawCranes();
