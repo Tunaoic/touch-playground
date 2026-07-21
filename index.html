@@ -375,7 +375,7 @@ const personCv = document.createElement('canvas');
 const pctx = personCv.getContext('2d');
 let segReady = false, segBusy = false, seg = null;
 // anchor ngai vàng trong ảnh 1920x1080 (tâm chỗ ngồi) + cỡ người
-const THRONE = { x: 0.508, y: 0.40, h: 0.34, b: 0.615 }; // x=tâm ghế, b=đáy khung người (ghim sau bàn), h=chiều cao khung
+const THRONE = { x: 0.508, y: 0.40, h: 0.34, b: 0.51, deskY: 0.478 }; // b=đáy khung người, deskY=mép mặt bàn (cắt cụt dưới đường này)
 // các mảng cảnh vẽ ĐÈ lên người để người "ngồi sau bàn": mặt bàn+hộc tủ, màn hình, ly cà phê
 const DESK_OVERLAYS = [
   { x0: 0.390, y0: 0.475, x1: 0.615, y1: 0.650 },  // mặt bàn + hộc tủ (desk_bg2)
@@ -624,7 +624,10 @@ function tientonDraw() {
       const ph = dh * THRONE.h;
       const pw = ph * personCv.width / personCv.height;
       ctx.save();
-      ctx.translate(tx, oy + dh * THRONE.b - ph); // ghim ĐÁY khung vào sau mặt bàn, kéo người lên
+      ctx.beginPath();
+      ctx.rect(0, 0, W, oy + dh * THRONE.deskY); // chỉ vẽ người PHÍA TRÊN mặt bàn
+      ctx.clip();
+      ctx.translate(tx, oy + dh * THRONE.b - ph);
       ctx.scale(-1, 1); // mirror
       ctx.drawImage(personCv, -pw / 2, 0, pw, ph);
       ctx.restore();
@@ -633,13 +636,7 @@ function tientonDraw() {
       ctx.textAlign = 'center';
       ctx.fillText('… đang triệu hồi chân thân …', tx, ty);
     }
-    // bàn/màn hình/ly cà phê đè lên người -> người ngồi SAU bàn
-    const iw = bgImg.naturalWidth, ih = bgImg.naturalHeight;
-    for (const o of DESK_OVERLAYS) {
-      ctx.drawImage(bgImg,
-        o.x0 * iw, o.y0 * ih, (o.x1 - o.x0) * iw, (o.y1 - o.y0) * ih,
-        ox + dw * o.x0, oy + dh * o.y0, dw * (o.x1 - o.x0), dh * (o.y1 - o.y0));
-    }
+
     // 3b. hạc tiên bay lượn
     drawCranes();
   }
