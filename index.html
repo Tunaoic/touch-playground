@@ -41,6 +41,47 @@ function resize() {
 }
 addEventListener('resize', resize); resize();
 
+// ---- sprite kiếm: gen bằng AI trên nền đen, key đen -> trong suốt ----
+let swordSprite = null;
+(() => {
+  const img = new Image();
+  img.onload = () => {
+    const c = document.createElement('canvas');
+    c.width = img.width; c.height = img.height;
+    const cc = c.getContext('2d');
+    cc.drawImage(img, 0, 0);
+    const id = cc.getImageData(0, 0, c.width, c.height), d = id.data;
+    for (let i = 0; i < d.length; i += 4) {
+      const m = Math.max(d[i], d[i + 1], d[i + 2]);
+      d[i + 3] = Math.max(0, Math.min(255, (m - 14) * 10)); // key nền đen, giữ viền glow
+    }
+    cc.putImageData(id, 0, 0);
+    swordSprite = c;
+  };
+  img.src = 'assets/sword.jpg';
+})();
+
+// ---- âm thanh kiếm khí (bật sau cú chạm đầu tiên — luật autoplay) ----
+let ac = null;
+addEventListener('pointerdown', () => { if (!ac) ac = new (window.AudioContext || window.webkitAudioContext)(); }, { once: true });
+function whoosh(freq0, freq1, dur, vol) {
+  if (!ac) return;
+  const t = ac.currentTime;
+  const buf = ac.createBuffer(1, ac.sampleRate * dur, ac.sampleRate);
+  const ch = buf.getChannelData(0);
+  for (let i = 0; i < ch.length; i++) ch[i] = Math.random() * 2 - 1;
+  const src = ac.createBufferSource(); src.buffer = buf;
+  const bp = ac.createBiquadFilter(); bp.type = 'bandpass'; bp.Q.value = 1.2;
+  bp.frequency.setValueAtTime(freq0, t);
+  bp.frequency.exponentialRampToValueAtTime(freq1, t + dur);
+  const g = ac.createGain();
+  g.gain.setValueAtTime(0, t);
+  g.gain.linearRampToValueAtTime(vol, t + dur * 0.15);
+  g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  src.connect(bp); bp.connect(g); g.connect(ac.destination);
+  src.start(t); src.stop(t + dur);
+}
+
 // ================= Hand parsing =================
 let hands = [], prevGesture = {}, palmPrev = {}; // palmPrev: {label:{x,y,t}}
 const OPEN_T = 1.55, FIST_T = 1.05;
@@ -112,7 +153,7 @@ mpSeg.onResults(r => {
 let swords = [], swordMode = 'orbit';
 let targetCount = 0, countBuf = [], spawnTimer = 0, cooldown = 0;
 let gatherLabel = null, gatherLost = 0;
-let parts = [], rings = [], flash = 0;
+let parts = [], rings = [], flash = 0, shake = 0;
 
 function emit(o) { parts.push({ vx:0, vy:0, life:1, decay:1.8, size:2.4, hue:200, ...o }); }
 
@@ -128,6 +169,7 @@ function newSword(theta) {
 
 function update(dt) {
   flash = Math.max(0, flash - dt * 1.6);
+  shake = Math.max(0, shake - dt * 3);
   cooldown = Math.max(0, cooldown - dt);
   const { cx, cy, rx, ry } = orbitParams();
 
@@ -149,6 +191,7 @@ function update(dt) {
     const fist = hands.find(h => h.gesture === 'fist');
     if (fist && swords.length > 0) {
       swordMode = 'gather'; gatherLabel = fist.label; gatherLost = 0;
+      whoosh(1400, 250, 0.45, 0.3);
       hint.textContent = '✊ Thu kiếm — bung tay ✋ để chưởng!';
     } else {
       if (stable !== null && cooldown <= 0 && hands.some(h => h.gesture !== 'fist')) targetCount = stable;
@@ -158,6 +201,7 @@ function update(dt) {
         const th = swords.length ? swords[swords.length - 1].theta + 1.2 : -Math.PI / 2;
         swords.push(newSword(th));
         flash = Math.max(flash, 0.25);
+        whoosh(400, 1800, 0.25, 0.22);
         for (let i = 0; i < 14; i++) {
           const a = Math.random() * Math.PI * 2;
           emit({ x: cx + Math.cos(th) * rx, y: cy + Math.sin(th) * ry, vx: Math.cos(a)*2, vy: Math.sin(a)*2, hue: 195 });
@@ -177,6 +221,9 @@ function update(dt) {
       s.x = cx + Math.cos(s.theta) * rx;
       s.y = cy + s.z * ry + Math.sin(performance.now() / 500 + i * 2) * 6 * DPR;
       s.ang = s.theta + Math.PI / 2 + (s.z < 0 ? Math.PI : 0); // mũi theo chiều bay
+      // vệt khí lúc orbit
+      s.trail.push({ x: s.x, y: s.y });
+      if (s.trail.length > 7) s.trail.shift();
     });
   }
 
@@ -202,7 +249,8 @@ function update(dt) {
           s.ang = Math.atan2(s.vy, s.vx);
           s.delay = i * 0.05; s.trail = []; s.gone = false;
         });
-        swordMode = 'launch'; flash = 1;
+        swordMode = 'launch'; flash = 1; shake = 1;
+        whoosh(180, 2600, 0.55, 0.5);
         rings.push({ x: h.x, y: h.y, r: 10 * DPR, a: 1 });
         hint.textContent = '⚔️ NGỰ KIẾM CHƯỞNG!';
       } else {
@@ -216,6 +264,11 @@ function update(dt) {
           s.ang = a;             // mũi kiếm chĩa ra ngoài quanh nắm đấm
           s.z = 1; s.sp = 1;
           if (Math.random() < 0.3) emit({ x: s.x, y: s.y, hue: 205, size: 1.8, decay: 2.5 });
+          if (Math.random() < 0.35) {
+            const aa = Math.random() * Math.PI * 2, rr = h.size * (1.5 + Math.random());
+            emit({ x: h.x + Math.cos(aa) * rr, y: h.y + Math.sin(aa) * rr,
+                   vx: -Math.cos(aa) * 3.5, vy: -Math.sin(aa) * 3.5, hue: 210, size: 2, decay: 2.8 });
+          }
         });
       }
     }
@@ -253,35 +306,21 @@ function update(dt) {
 
 // ================= Vẽ =================
 function drawSword(s) {
-  const sc = (s.z >= 0 ? 1 + s.z * 0.22 : 1 + s.z * 0.35) * s.sp;
-  const L = 96 * DPR * sc;
+  const sc = (s.z >= 0 ? 1 + s.z * 0.25 : 1 + s.z * 0.38) * s.sp;
+  const L = 150 * DPR * sc;                        // to hơn hẳn bản cũ
   ctx.save();
   ctx.translate(s.x, s.y);
-  ctx.rotate(s.ang);
-  ctx.globalAlpha = s.z < 0 ? 0.62 : 1;
-  ctx.shadowColor = '#7fd0ff'; ctx.shadowBlur = 16 * DPR;
-  // lưỡi kiếm
-  const g = ctx.createLinearGradient(0, -L * 0.5, 0, L * 0.5);
-  g.addColorStop(0, '#ffffff'); g.addColorStop(0.5, '#cfeaff'); g.addColorStop(1, '#7fb8e8');
-  ctx.fillStyle = g;
-  ctx.beginPath();
-  ctx.moveTo(0, -L * 0.52);                       // mũi
-  ctx.lineTo(L * 0.045, -L * 0.38);
-  ctx.lineTo(L * 0.045, L * 0.30);
-  ctx.lineTo(-L * 0.045, L * 0.30);
-  ctx.lineTo(-L * 0.045, -L * 0.38);
-  ctx.closePath(); ctx.fill();
-  // sống kiếm sáng
-  ctx.fillStyle = 'rgba(255,255,255,.9)';
-  ctx.fillRect(-L * 0.008, -L * 0.5, L * 0.016, L * 0.78);
-  // chắn tay + chuôi
-  ctx.shadowBlur = 8 * DPR;
-  ctx.fillStyle = '#e8b84a';
-  ctx.fillRect(-L * 0.11, L * 0.30, L * 0.22, L * 0.05);
-  ctx.fillStyle = '#3a4a6a';
-  ctx.fillRect(-L * 0.03, L * 0.35, L * 0.06, L * 0.16);
-  ctx.fillStyle = '#e8b84a';
-  ctx.beginPath(); ctx.arc(0, L * 0.53, L * 0.035, 0, Math.PI * 2); ctx.fill();
+  ctx.rotate(s.ang + Math.PI);                     // sprite mũi chĩa XUỐNG -> xoay bù
+  ctx.globalAlpha = s.z < 0 ? 0.6 : 1;
+  if (swordSprite) {
+    const w = L * swordSprite.width / swordSprite.height;
+    ctx.shadowColor = '#7fd0ff'; ctx.shadowBlur = 20 * DPR;
+    ctx.drawImage(swordSprite, -w / 2, -L / 2, w, L);
+  } else {                                          // fallback nếu sprite chưa load
+    ctx.shadowColor = '#7fd0ff'; ctx.shadowBlur = 16 * DPR;
+    ctx.fillStyle = '#cfeaff';
+    ctx.fillRect(-L * 0.04, -L * 0.5, L * 0.08, L);
+  }
   ctx.restore();
   ctx.globalAlpha = 1; ctx.shadowBlur = 0;
 }
@@ -315,6 +354,7 @@ function loop(now) {
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, W, H);
 
+  if (shake > 0) { ctx.translate((Math.random()-0.5) * 22 * DPR * shake, (Math.random()-0.5) * 22 * DPR * shake); }
   const m = coverMap();
   // 1. nền camera (mirror)
   if (video.readyState >= 2) {
@@ -327,7 +367,7 @@ function loop(now) {
 
   // 2. kiếm sau lưng (z<0) — bị người che
   const back = swords.filter(s => !s.gone && s.z < 0).sort((a, b) => a.z - b.z);
-  for (const s of back) drawSword(s);
+  for (const s of back) { drawTrail(s); drawSword(s); }
 
   // 3. người đè lên (cutout segmentation, cùng phép chiếu camera)
   if (segReady && personCv.width) {
