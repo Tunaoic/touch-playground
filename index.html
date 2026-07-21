@@ -3,18 +3,32 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
-<title>Ngự Kiếm</title>
+<title>Touch Playground</title>
 <style>
   html, body { margin:0; padding:0; background:#000; height:100%; overflow:hidden; }
   #stage { position:relative; width:100vw; height:100vh; }
   video { display:none; }
   canvas { position:absolute; inset:0; width:100%; height:100%; }
+  #bar {
+    position:absolute; top:12px; left:50%; transform:translateX(-50%);
+    display:flex; gap:8px; z-index:10;
+    flex-wrap:wrap; justify-content:center; max-width:96vw;
+    background:rgba(10,10,14,.55); backdrop-filter:blur(10px);
+    padding:8px 10px; border-radius:16px; border:1px solid rgba(255,255,255,.12);
+  }
+  #bar button {
+    font:14px -apple-system, sans-serif; color:#ddd; cursor:pointer;
+    background:transparent; border:1px solid transparent; border-radius:10px;
+    padding:7px 12px; transition:.15s;
+  }
+  #bar button:hover { background:rgba(255,255,255,.08); }
+  #bar button.on { background:rgba(255,255,255,.15); border-color:rgba(255,255,255,.3); color:#fff; }
   #hint {
     position:absolute; bottom:16px; left:50%; transform:translateX(-50%);
-    color:#eef; font:13px -apple-system, sans-serif; text-align:center;
-    background:rgba(8,10,18,.55); padding:6px 16px; border-radius:14px;
-    border:1px solid rgba(140,180,255,.25); pointer-events:none; z-index:10;
-    letter-spacing:.3px; max-width:92vw;
+    color:#eee; font:13px -apple-system, sans-serif; text-align:center;
+    background:rgba(10,10,14,.5); padding:6px 16px; border-radius:14px;
+    border:1px solid rgba(255,255,255,.1); pointer-events:none; z-index:10;
+    letter-spacing:.3px;
   }
 </style>
 </head>
@@ -22,6 +36,7 @@
 <div id="stage">
   <video id="video" playsinline></video>
   <canvas id="canvas"></canvas>
+  <div id="bar"></div>
   <div id="hint">Đang bật camera…</div>
 </div>
 
@@ -33,57 +48,21 @@ const video  = document.getElementById('video');
 const canvas = document.getElementById('canvas');
 const ctx    = canvas.getContext('2d');
 const hint   = document.getElementById('hint');
+const bar    = document.getElementById('bar');
 
-let W = 0, H = 0, DPR = Math.min(devicePixelRatio, 1.5);
+let W = 0, H = 0, DPR = Math.min(devicePixelRatio, 1.5); // cap DPR: đỡ lag trên màn retina
+const drawLayer = document.createElement('canvas'); // persistent layer for Draw mode
+const dctx = drawLayer.getContext('2d');
 function resize() {
   W = canvas.width  = innerWidth  * DPR;
   H = canvas.height = innerHeight * DPR;
+  drawLayer.width = W; drawLayer.height = H;
 }
 addEventListener('resize', resize); resize();
 
-// ---- sprite kiếm: gen bằng AI trên nền đen, key đen -> trong suốt ----
-let swordSprite = null;
-(() => {
-  const img = new Image();
-  img.onload = () => {
-    const c = document.createElement('canvas');
-    c.width = img.width; c.height = img.height;
-    const cc = c.getContext('2d');
-    cc.drawImage(img, 0, 0);
-    const id = cc.getImageData(0, 0, c.width, c.height), d = id.data;
-    for (let i = 0; i < d.length; i += 4) {
-      const m = Math.max(d[i], d[i + 1], d[i + 2]);
-      d[i + 3] = Math.max(0, Math.min(255, (m - 14) * 10)); // key nền đen, giữ viền glow
-    }
-    cc.putImageData(id, 0, 0);
-    swordSprite = c;
-  };
-  img.src = 'assets/sword.jpg';
-})();
-
-// ---- âm thanh kiếm khí (bật sau cú chạm đầu tiên — luật autoplay) ----
-let ac = null;
-addEventListener('pointerdown', () => { if (!ac) ac = new (window.AudioContext || window.webkitAudioContext)(); }, { once: true });
-function whoosh(freq0, freq1, dur, vol) {
-  if (!ac) return;
-  const t = ac.currentTime;
-  const buf = ac.createBuffer(1, ac.sampleRate * dur, ac.sampleRate);
-  const ch = buf.getChannelData(0);
-  for (let i = 0; i < ch.length; i++) ch[i] = Math.random() * 2 - 1;
-  const src = ac.createBufferSource(); src.buffer = buf;
-  const bp = ac.createBiquadFilter(); bp.type = 'bandpass'; bp.Q.value = 1.2;
-  bp.frequency.setValueAtTime(freq0, t);
-  bp.frequency.exponentialRampToValueAtTime(freq1, t + dur);
-  const g = ac.createGain();
-  g.gain.setValueAtTime(0, t);
-  g.gain.linearRampToValueAtTime(vol, t + dur * 0.15);
-  g.gain.exponentialRampToValueAtTime(0.001, t + dur);
-  src.connect(bp); bp.connect(g); g.connect(ac.destination);
-  src.start(t); src.stop(t + dur);
-}
-
 // ================= Hand parsing =================
-let hands = [], prevGesture = {}, palmPrev = {}; // palmPrev: {label:{x,y,t}}
+// each hand: {x,y,size,openness,gesture,tips:{index,middle,thumb},label}
+let hands = [];
 const OPEN_T = 1.55, FIST_T = 1.05;
 
 function parseHand(lm, label) {
@@ -97,310 +76,635 @@ function parseHand(lm, label) {
     up.push(dT > dP * 1.08);
     s += dT;
   }
-  // ngón cái: chóp 4 tách xa khớp ngón trỏ 5
-  const thumbUp = Math.hypot(lm[4].x - lm[5].x, lm[4].y - lm[5].y) > base * 0.62;
-  const nFingers = up.filter(Boolean).length + (thumbUp ? 1 : 0);
   const openness = (s / 4) / base;
+  const pinch = Math.hypot(lm[4].x - lm[8].x, lm[4].y - lm[8].y) < base * 0.35;
   let gesture = 'other';
   if (openness < FIST_T) gesture = 'fist';
   else if (openness > OPEN_T && up.every(Boolean)) gesture = 'open';
+  else if (up[0] && !up[1] && !up[2] && !up[3]) gesture = 'index';
+  else if (up[0] && up[1] && !up[2] && !up[3]) gesture = 'peace';
   const P = p => ({ x: (1 - p.x) * W, y: p.y * H });
-  return { ...P(midMcp), size: base * H, openness, gesture, nFingers, label,
-           wrist: P(wrist) };
+  return {
+    ...P(midMcp), size: base * H, openness, gesture, pinch, label,
+    tips: { index: P(lm[8]), middle: P(lm[12]), thumb: P(lm[4]) }
+  };
 }
 
-// ================= Person (segmentation) =================
-const personCv = document.createElement('canvas');
-const pctx = personCv.getContext('2d');
-const probeCv = document.createElement('canvas'); probeCv.width = 64; probeCv.height = 36;
-const probeCtx = probeCv.getContext('2d', { willReadFrequently: true });
-let segReady = false, segBusy = false, seg = null;
-let body = { x: 0.5, y: 0.55, w: 0.35, h: 0.8, seen: false }; // normalized (đã mirror)
-
-const mpSeg = new SelfieSegmentation({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation/${f}` });
-mpSeg.setOptions({ modelSelection: 1 });
-mpSeg.onResults(r => {
-  personCv.width = r.image.width; personCv.height = r.image.height;
-  pctx.clearRect(0, 0, personCv.width, personCv.height);
-  pctx.drawImage(r.segmentationMask, 0, 0);
-  pctx.globalCompositeOperation = 'source-in';
-  pctx.drawImage(r.image, 0, 0);
-  pctx.globalCompositeOperation = 'source-over';
-  // trọng tâm + khung người từ mask (downsample 64x36)
-  probeCtx.drawImage(r.segmentationMask, 0, 0, 64, 36);
-  const d = probeCtx.getImageData(0, 0, 64, 36).data;
-  let sx = 0, sy = 0, n = 0, minX = 64, maxX = 0, minY = 36, maxY = 0;
-  for (let y = 0; y < 36; y++) for (let x = 0; x < 64; x++) {
-    if (d[(y * 64 + x) * 4] > 128) {
-      sx += x; sy += y; n++;
-      if (x < minX) minX = x; if (x > maxX) maxX = x;
-      if (y < minY) minY = y; if (y > maxY) maxY = y;
-    }
-  }
-  if (n > 20) {
-    const k = 0.25; // smooth
-    body.x += ((1 - (sx / n + 0.5) / 64) - body.x) * k;   // mirror
-    body.y += ((sy / n + 0.5) / 36 - body.y) * k;
-    body.w += ((maxX - minX + 1) / 64 - body.w) * k;
-    body.h += ((maxY - minY + 1) / 36 - body.h) * k;
-    body.seen = true;
-  } else body.seen = false;
-  segReady = true; segBusy = false;
-});
-
-// ================= Kiếm =================
-// swordMode: idle-orbit | gather | launch ; mỗi kiếm: {theta,sp,x,y,ang,z,trail,vx,vy,delay,gone}
-let swords = [], swordMode = 'orbit';
-let targetCount = 0, countBuf = [], spawnTimer = 0, cooldown = 0;
-let gatherLabel = null, gatherLost = 0;
-let parts = [], rings = [], flash = 0, shake = 0;
-
-function emit(o) { parts.push({ vx:0, vy:0, life:1, decay:1.8, size:2.4, hue:200, ...o }); }
-
-function orbitParams() {
-  const cx = body.x * W, cy = (body.y - body.h * 0.12) * H;
-  const rx = Math.max(body.w * W * 0.78, 170 * DPR);
-  return { cx, cy, rx, ry: rx * 0.22 };
-}
-
-function newSword(theta) {
-  return { theta, sp: 0, x: 0, y: 0, ang: 0, z: 0, trail: [], vx: 0, vy: 0, delay: 0, gone: false };
-}
-
-function update(dt) {
-  flash = Math.max(0, flash - dt * 1.6);
-  shake = Math.max(0, shake - dt * 3);
-  cooldown = Math.max(0, cooldown - dt);
-  const { cx, cy, rx, ry } = orbitParams();
-
-  // ---- đếm ngón (ổn định qua 10 mẫu) ----
-  if (hands.length) {
-    countBuf.push(Math.max(...hands.map(h => h.nFingers)));
-    if (countBuf.length > 10) countBuf.shift();
-  }
-  const stable = (() => {
-    if (countBuf.length < 6) return null;
-    const freq = {};
-    for (const c of countBuf) freq[c] = (freq[c] || 0) + 1;
-    for (const k in freq) if (freq[k] >= 6) return +k;
-    return null;
-  })();
-
-  if (swordMode === 'orbit') {
-    // chỉnh số kiếm theo ngón tay (khi không cooldown, có tay, không nắm đấm)
-    const fist = hands.find(h => h.gesture === 'fist');
-    if (fist && swords.length > 0) {
-      swordMode = 'gather'; gatherLabel = fist.label; gatherLost = 0;
-      whoosh(1400, 250, 0.45, 0.3);
-      hint.textContent = '✊ Thu kiếm — bung tay ✋ để chưởng!';
-    } else {
-      if (stable !== null && cooldown <= 0 && hands.some(h => h.gesture !== 'fist')) targetCount = stable;
-      spawnTimer -= dt;
-      if (swords.length < targetCount && spawnTimer <= 0) {
-        spawnTimer = 0.22;
-        const th = swords.length ? swords[swords.length - 1].theta + 1.2 : -Math.PI / 2;
-        swords.push(newSword(th));
-        flash = Math.max(flash, 0.25);
-        whoosh(400, 1800, 0.25, 0.22);
-        for (let i = 0; i < 14; i++) {
-          const a = Math.random() * Math.PI * 2;
-          emit({ x: cx + Math.cos(th) * rx, y: cy + Math.sin(th) * ry, vx: Math.cos(a)*2, vy: Math.sin(a)*2, hue: 195 });
-        }
-      }
-      if (swords.length > targetCount) swords.splice(targetCount);
-    }
-    // quỹ đạo: dàn đều + tiến
-    const n = swords.length;
-    swords.forEach((s, i) => {
-      s.sp = Math.min(1, s.sp + dt * 2.5);
-      const want = i * Math.PI * 2 / Math.max(1, n);
-      // kéo dần về vị trí dàn đều
-      let diff = ((want - s.theta + swords[0].theta + Math.PI) % (Math.PI * 2)) - Math.PI;
-      s.theta += dt * 1.5 + diff * dt * 1.2;
-      s.z = Math.sin(s.theta);
-      s.x = cx + Math.cos(s.theta) * rx;
-      s.y = cy + s.z * ry + Math.sin(performance.now() / 500 + i * 2) * 6 * DPR;
-      s.ang = s.theta + Math.PI / 2 + (s.z < 0 ? Math.PI : 0); // mũi theo chiều bay
-      // vệt khí lúc orbit
-      s.trail.push({ x: s.x, y: s.y });
-      if (s.trail.length > 7) s.trail.shift();
-    });
-  }
-
-  else if (swordMode === 'gather') {
-    const h = hands.find(h => h.label === gatherLabel) || hands[0];
-    if (!h) { gatherLost += dt; if (gatherLost > 0.6) swordMode = 'orbit'; }
-    else {
-      gatherLost = 0;
-      // fist -> open = CHƯỞNG
-      if (prevGesture[h.label] === 'fist' && h.gesture === 'open') {
-        const pv = palmPrev[h.label];
-        let dx = 0, dy = 0;
-        if (pv) { dx = h.x - pv.x; dy = h.y - pv.y; }
-        const sp = Math.hypot(dx, dy);
-        let dirx, diry;
-        if (sp > 12 * DPR) { dirx = dx / sp; diry = dy / sp; }                 // hướng tay đẩy
-        else { const vx = h.x - cx, vy = h.y - cy, l = Math.hypot(vx, vy) || 1; dirx = vx / l; diry = vy / l; }
-        swords.forEach((s, i) => {
-          const spread = (i - (swords.length - 1) / 2) * 0.13;
-          const ca = Math.cos(spread), sa = Math.sin(spread);
-          s.vx = (dirx * ca - diry * sa) * 2400 * DPR / 60;
-          s.vy = (dirx * sa + diry * ca) * 2400 * DPR / 60;
-          s.ang = Math.atan2(s.vy, s.vx);
-          s.delay = i * 0.05; s.trail = []; s.gone = false;
-        });
-        swordMode = 'launch'; flash = 1; shake = 1;
-        whoosh(180, 2600, 0.55, 0.5);
-        rings.push({ x: h.x, y: h.y, r: 10 * DPR, a: 1 });
-        hint.textContent = '⚔️ NGỰ KIẾM CHƯỞNG!';
-      } else {
-        // xoáy về nắm đấm
-        swords.forEach((s, i) => {
-          const a = i * Math.PI * 2 / Math.max(1, swords.length) + performance.now() / 300;
-          const tx = h.x + Math.cos(a) * h.size * 0.55;
-          const ty = h.y + Math.sin(a) * h.size * 0.55;
-          s.x += (tx - s.x) * Math.min(1, dt * 9);
-          s.y += (ty - s.y) * Math.min(1, dt * 9);
-          s.ang = a;             // mũi kiếm chĩa ra ngoài quanh nắm đấm
-          s.z = 1; s.sp = 1;
-          if (Math.random() < 0.3) emit({ x: s.x, y: s.y, hue: 205, size: 1.8, decay: 2.5 });
-          if (Math.random() < 0.35) {
-            const aa = Math.random() * Math.PI * 2, rr = h.size * (1.5 + Math.random());
-            emit({ x: h.x + Math.cos(aa) * rr, y: h.y + Math.sin(aa) * rr,
-                   vx: -Math.cos(aa) * 3.5, vy: -Math.sin(aa) * 3.5, hue: 210, size: 2, decay: 2.8 });
-          }
-        });
-      }
-    }
-  }
-
-  else if (swordMode === 'launch') {
-    let alive = 0;
-    for (const s of swords) {
-      if (s.gone) continue;
-      if (s.delay > 0) { s.delay -= dt; alive++; continue; }
-      s.trail.push({ x: s.x, y: s.y });
-      if (s.trail.length > 12) s.trail.shift();
-      s.x += s.vx * dt * 60; s.y += s.vy * dt * 60;
-      if (s.x < -0.2 * W || s.x > 1.2 * W || s.y < -0.2 * H || s.y > 1.2 * H) s.gone = true;
-      else alive++;
-      if (Math.random() < 0.5) emit({ x: s.x, y: s.y, hue: 200 + Math.random()*30, size: 2.2, decay: 2.2 });
-    }
-    if (alive === 0) {
-      swords = []; targetCount = 0; countBuf = [];
-      swordMode = 'orbit'; cooldown = 1.4;
-      hint.textContent = 'Giơ ☝️…🖐️ 1-5 ngón để triệu kiếm';
-    }
-  }
-
-  for (const r of rings) { r.r += 1400 * dt * DPR; r.a -= dt * 2.2; }
-  rings = rings.filter(r => r.a > 0);
-
-  // nhớ gesture + vị trí tay cho frame sau
-  prevGesture = {};
-  for (const h of hands) {
-    prevGesture[h.label] = h.gesture;
-    palmPrev[h.label] = { x: h.x, y: h.y, t: performance.now() };
-  }
-}
-
-// ================= Vẽ =================
-function drawSword(s) {
-  const sc = (s.z >= 0 ? 1 + s.z * 0.25 : 1 + s.z * 0.38) * s.sp;
-  const L = 150 * DPR * sc;                        // to hơn hẳn bản cũ
-  ctx.save();
-  ctx.translate(s.x, s.y);
-  ctx.rotate(s.ang + Math.PI);                     // sprite mũi chĩa XUỐNG -> xoay bù
-  ctx.globalAlpha = s.z < 0 ? 0.6 : 1;
-  if (swordSprite) {
-    const w = L * swordSprite.width / swordSprite.height;
-    ctx.shadowColor = '#7fd0ff'; ctx.shadowBlur = 20 * DPR;
-    ctx.drawImage(swordSprite, -w / 2, -L / 2, w, L);
-  } else {                                          // fallback nếu sprite chưa load
-    ctx.shadowColor = '#7fd0ff'; ctx.shadowBlur = 16 * DPR;
-    ctx.fillStyle = '#cfeaff';
-    ctx.fillRect(-L * 0.04, -L * 0.5, L * 0.08, L);
-  }
-  ctx.restore();
-  ctx.globalAlpha = 1; ctx.shadowBlur = 0;
-}
-
-function drawTrail(s) {
-  if (!s.trail.length) return;
-  ctx.save();
-  ctx.globalCompositeOperation = 'lighter';
-  ctx.strokeStyle = 'rgba(140,210,255,.55)'; ctx.lineCap = 'round';
-  ctx.shadowColor = '#66bbff'; ctx.shadowBlur = 14 * DPR;
-  for (let i = 1; i < s.trail.length; i++) {
-    ctx.globalAlpha = i / s.trail.length * 0.6;
-    ctx.lineWidth = (i / s.trail.length) * 7 * DPR;
-    ctx.beginPath();
-    ctx.moveTo(s.trail[i - 1].x, s.trail[i - 1].y);
-    ctx.lineTo(s.trail[i].x, s.trail[i].y);
-    ctx.stroke();
-  }
-  ctx.restore();
-}
-
-function coverMap() {
-  const vw = video.videoWidth || 640, vh = video.videoHeight || 480;
-  const sc = Math.max(W / vw, H / vh);
-  return { dw: vw * sc, dh: vh * sc, ox: (W - vw * sc) / 2, oy: (H - vh * sc) / 2 };
-}
-
-let last = performance.now();
-function loop(now) {
-  const dt = Math.min(0.05, (now - last) / 1000); last = now;
-  ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.clearRect(0, 0, W, H);
-
-  if (shake > 0) { ctx.translate((Math.random()-0.5) * 22 * DPR * shake, (Math.random()-0.5) * 22 * DPR * shake); }
-  const m = coverMap();
-  // 1. nền camera (mirror)
-  if (video.readyState >= 2) {
-    ctx.save(); ctx.translate(W, 0); ctx.scale(-1, 1);
-    ctx.drawImage(video, m.ox, m.oy, m.dw, m.dh);
-    ctx.restore();
-  }
-
-  update(dt);
-
-  // 2. kiếm sau lưng (z<0) — bị người che
-  const back = swords.filter(s => !s.gone && s.z < 0).sort((a, b) => a.z - b.z);
-  for (const s of back) { drawTrail(s); drawSword(s); }
-
-  // 3. người đè lên (cutout segmentation, cùng phép chiếu camera)
-  if (segReady && personCv.width) {
-    ctx.save(); ctx.translate(W, 0); ctx.scale(-1, 1);
-    ctx.drawImage(personCv, m.ox, m.oy, m.dw, m.dh);
-    ctx.restore();
-  }
-
-  // 4. kiếm trước mặt + vệt khí
-  const front = swords.filter(s => !s.gone && s.z >= 0).sort((a, b) => a.z - b.z);
-  for (const s of front) { drawTrail(s); drawSword(s); }
-
-  // 5. hạt sáng + vòng chấn động + flash
+// ================= Shared particles =================
+let parts = []; // {x,y,vx,vy,life,decay,size,hue,grav,add}
+function emit(o) { parts.push({ vx:0, vy:0, life:1, decay:1.5, size:2.5, hue:30, grav:0, add:true, ...o }); }
+function drawParts(dt) {
   ctx.globalCompositeOperation = 'lighter';
   for (const p of parts) {
     p.life -= dt * p.decay;
-    p.x += p.vx * dt * 60; p.y += p.vy * dt * 60;
+    p.x += p.vx * dt * 60; p.y += p.vy * dt * 60; p.vy += p.grav * dt * 60;
     if (p.life <= 0) continue;
-    ctx.globalAlpha = p.life;
-    ctx.fillStyle = `hsl(${p.hue} 100% 70%)`;
-    ctx.shadowColor = `hsl(${p.hue} 100% 60%)`; ctx.shadowBlur = 8 * DPR;
-    ctx.beginPath(); ctx.arc(p.x, p.y, p.size * DPR * p.life, 0, Math.PI * 2); ctx.fill();
+    ctx.globalAlpha = Math.max(0, p.life);
+    ctx.fillStyle = `hsl(${p.hue} 100% 65%)`;
+    ctx.shadowColor = `hsl(${p.hue} 100% 55%)`;
+    ctx.shadowBlur = 10 * DPR;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.size * DPR * p.life, 0, Math.PI * 2);
+    ctx.fill();
   }
   parts = parts.filter(p => p.life > 0);
-  for (const r of rings) {
-    ctx.globalAlpha = r.a;
-    ctx.strokeStyle = '#bfe6ff'; ctx.shadowColor = '#66bbff'; ctx.shadowBlur = 20 * DPR;
-    ctx.lineWidth = 5 * DPR * r.a;
-    ctx.beginPath(); ctx.arc(r.x, r.y, r.r, 0, Math.PI * 2); ctx.stroke();
+  ctx.globalAlpha = 1; ctx.shadowBlur = 0;
+  ctx.globalCompositeOperation = 'source-over';
+}
+
+// ================= MODE: Magic =================
+const RUNES = 'ᚠᚢᚦᚨᚱᚲᚷᚹᚺᚾᛁᛃᛇᛈᛉᛋᛏᛒᛖᛗᛚᛜᛞᛟ';
+let circles = [], prevGesture = {};
+
+function magicUpdate(dt) {
+  for (const h of hands) {
+    const prev = prevGesture[h.label];
+    if (prev === 'fist' && h.gesture === 'open') {
+      circles = circles.filter(c => c.label !== h.label);
+      circles.push({ label: h.label, x: h.x, y: h.y, r: 0, life: 0, seed: Math.random() * 1000, alive: true });
+      for (let i = 0; i < 50; i++) {
+        const a = Math.random() * Math.PI * 2, v = 1 + Math.random() * 5;
+        emit({ x: h.x, y: h.y, vx: Math.cos(a)*v, vy: Math.sin(a)*v, hue: 32, decay: 2, grav: 0.05 });
+      }
+    }
+  }
+  for (const c of circles) {
+    const h = hands.find(h => h.label === c.label && h.gesture === 'open');
+    if (h) { c.alive = true;
+      c.x += (h.x - c.x) * Math.min(1, dt*10); c.y += (h.y - c.y) * Math.min(1, dt*10);
+      c.tr = Math.max(h.size * 2.6, 120 * DPR);
+    } else c.alive = false;
+    c.life += dt;
+    c.r = c.alive ? c.r + ((c.tr || 150*DPR) - c.r) * Math.min(1, dt*6) : c.r * (1 - Math.min(1, dt*7));
+  }
+  circles = circles.filter(c => c.r > 4);
+}
+function magicDraw() {
+  for (const c of circles) {
+    const r = c.r;
+    ctx.save(); ctx.translate(c.x, c.y);
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.globalAlpha = 0.85 + 0.15 * Math.sin(c.life * 30 + c.seed);
+    ctx.shadowColor = '#ff8c1a'; ctx.strokeStyle = '#ffc46b'; ctx.lineCap = 'round';
+    ctx.shadowBlur = 30 * DPR; ctx.lineWidth = 3.5 * DPR;
+    dashRing(r, c.life * 0.9, 60, 0.75);
+    ctx.lineWidth = 2.5 * DPR; dashRing(r * 0.72, -c.life * 0.6, 40, 0.65);
+    ctx.lineWidth = 2 * DPR;
+    ctx.beginPath(); ctx.arc(0, 0, r * 0.45, 0, Math.PI * 2); ctx.stroke();
+    ctx.shadowBlur = 14 * DPR; ctx.fillStyle = '#ffd9a0';
+    const n = 22, rr = r * 0.585;
+    ctx.font = `${Math.max(10, r * 0.11)}px serif`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    for (let i = 0; i < n; i++) {
+      const a = -c.life * 0.85 + (i / n) * Math.PI * 2;
+      ctx.save(); ctx.translate(Math.cos(a)*rr, Math.sin(a)*rr); ctx.rotate(a + Math.PI/2);
+      ctx.fillText(RUNES[(i + (c.seed|0)) % RUNES.length], 0, 0); ctx.restore();
+    }
+    ctx.lineWidth = 1.6 * DPR;
+    tri(r * 0.45, c.life * 1.1); tri(r * 0.45, c.life * 1.1 + Math.PI);
+    ctx.restore();
+    if (c.alive && Math.random() < 0.8) {
+      const a = Math.random() * Math.PI * 2;
+      emit({ x: c.x + Math.cos(a)*r, y: c.y + Math.sin(a)*r, vx: Math.cos(a), vy: Math.sin(a)-0.5, hue: 34, decay: 2, size: 1.8 });
+    }
+  }
+}
+function dashRing(r, rot, segs, duty) {
+  ctx.beginPath();
+  for (let i = 0; i < segs; i++) {
+    const a0 = rot + (i / segs) * Math.PI * 2, a1 = a0 + (Math.PI*2/segs)*duty;
+    ctx.moveTo(Math.cos(a0)*r, Math.sin(a0)*r); ctx.arc(0, 0, r, a0, a1);
+  }
+  ctx.stroke();
+}
+function tri(r, rot) {
+  ctx.beginPath();
+  for (let i = 0; i <= 3; i++) {
+    const a = rot + (i/3) * Math.PI * 2;
+    ctx[i ? 'lineTo' : 'moveTo'](Math.cos(a)*r, Math.sin(a)*r);
+  }
+  ctx.stroke();
+}
+
+// ================= MODE: Fire =================
+function fireUpdate() {
+  for (const h of hands) {
+    if (h.gesture !== 'open' && h.gesture !== 'other') continue;
+    const R = h.size * 0.5;
+    for (let i = 0; i < 6; i++) {
+      const a = Math.random() * Math.PI * 2, rr = Math.random() * R;
+      emit({
+        x: h.x + Math.cos(a)*rr, y: h.y - h.size*0.3 + Math.sin(a)*rr*0.5,
+        vx: (Math.random()-0.5)*0.8, vy: -2 - Math.random()*2.5,
+        hue: 15 + Math.random()*35, size: 3 + Math.random()*4, decay: 1.2 + Math.random()
+      });
+    }
+    // blue core flicker
+    if (Math.random() < 0.3) emit({ x: h.x, y: h.y - h.size*0.3, vy: -1.5, hue: 200, size: 2.5, decay: 2.5 });
+  }
+}
+
+// ================= MODE: Particles =================
+let pTimer = 0, shockwaves = [];
+function particlesUpdate(dt) {
+  pTimer += dt;
+  for (const h of hands) {
+    const prev = prevGesture[h.label];
+    if (h.gesture === 'open' && pTimer > 0.35) {
+      pTimer = 0;
+      const hue = Math.random() * 360;
+      for (let i = 0; i < 70; i++) {
+        const a = Math.random() * Math.PI * 2, v = 2 + Math.random() * 6;
+        emit({ x: h.x, y: h.y, vx: Math.cos(a)*v, vy: Math.sin(a)*v, hue: hue + Math.random()*40, grav: 0.12, decay: 0.9, size: 2.8 });
+      }
+    }
+    if (h.gesture === 'index') {
+      for (let i = 0; i < 4; i++) emit({
+        x: h.tips.index.x + (Math.random()-0.5)*8*DPR, y: h.tips.index.y + (Math.random()-0.5)*8*DPR,
+        vx: (Math.random()-0.5), vy: (Math.random()-0.5), hue: (performance.now()/10) % 360, decay: 1.1, size: 3
+      });
+    }
+    if (h.gesture === 'fist' && prev !== 'fist') shockwaves.push({ x: h.x, y: h.y, r: 10, a: 1 });
+  }
+  for (const s of shockwaves) { s.r += 900 * dt * DPR; s.a -= dt * 1.6; }
+  shockwaves = shockwaves.filter(s => s.a > 0);
+}
+function particlesDraw() {
+  ctx.globalCompositeOperation = 'lighter';
+  for (const s of shockwaves) {
+    ctx.globalAlpha = s.a;
+    ctx.strokeStyle = '#9fd8ff'; ctx.shadowColor = '#4db2ff'; ctx.shadowBlur = 25 * DPR;
+    ctx.lineWidth = 6 * DPR * s.a;
+    ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2); ctx.stroke();
   }
   ctx.globalAlpha = 1; ctx.shadowBlur = 0;
   ctx.globalCompositeOperation = 'source-over';
-  if (flash > 0) { ctx.fillStyle = `rgba(200,230,255,${Math.min(1, flash)})`; ctx.fillRect(0, 0, W, H); }
+}
+
+// ================= MODE: Draw =================
+let lastPt = {};
+function drawUpdate() {
+  for (const h of hands) {
+    if (h.gesture === 'index') {
+      const t = h.tips.index, prev = lastPt[h.label];
+      dctx.strokeStyle = `hsl(${(performance.now()/15)%360} 95% 60%)`;
+      dctx.lineWidth = 6 * DPR; dctx.lineCap = 'round';
+      dctx.shadowColor = dctx.strokeStyle; dctx.shadowBlur = 12 * DPR;
+      if (prev && Math.hypot(t.x-prev.x, t.y-prev.y) < 200*DPR) {
+        dctx.beginPath(); dctx.moveTo(prev.x, prev.y); dctx.lineTo(t.x, t.y); dctx.stroke();
+      }
+      lastPt[h.label] = { x: t.x, y: t.y };
+    } else {
+      lastPt[h.label] = null;
+      if (h.gesture === 'open') {
+        dctx.save(); dctx.globalCompositeOperation = 'destination-out';
+        dctx.beginPath(); dctx.arc(h.x, h.y, h.size * 0.9, 0, Math.PI * 2); dctx.fill();
+        dctx.restore();
+      }
+    }
+  }
+}
+function drawDraw() {
+  ctx.drawImage(drawLayer, 0, 0);
+  for (const h of hands) {
+    if (h.gesture === 'open') { // show eraser
+      ctx.strokeStyle = 'rgba(255,255,255,.5)'; ctx.lineWidth = 2 * DPR;
+      ctx.setLineDash([6*DPR, 6*DPR]);
+      ctx.beginPath(); ctx.arc(h.x, h.y, h.size * 0.9, 0, Math.PI*2); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  }
+}
+
+// ================= MODE: Lightning =================
+let boltTimer = 0, bolts = [];
+function lightningUpdate(dt) {
+  boltTimer -= dt;
+  for (const h of hands) {
+    if (h.gesture !== 'peace' || boltTimer > 0) continue;
+    boltTimer = 0.09;
+    for (const tip of [h.tips.index, h.tips.middle]) {
+      const ang = Math.atan2(tip.y - h.y, tip.x - h.x);
+      const pts = [{ x: tip.x, y: tip.y }];
+      let a = ang, x = tip.x, y = tip.y;
+      const segs = 14 + (Math.random()*8|0);
+      for (let i = 0; i < segs; i++) {
+        a += (Math.random() - 0.5) * 1.1;
+        const len = (20 + Math.random() * 45) * DPR;
+        x += Math.cos(a) * len; y += Math.sin(a) * len;
+        pts.push({ x, y });
+      }
+      bolts.push({ pts, a: 1 });
+      emit({ x: tip.x, y: tip.y, hue: 210, size: 5, decay: 3 });
+    }
+  }
+  for (const b of bolts) b.a -= dt * 7;
+  bolts = bolts.filter(b => b.a > 0);
+}
+function lightningDraw() {
+  ctx.globalCompositeOperation = 'lighter';
+  for (const b of bolts) {
+    ctx.globalAlpha = b.a;
+    ctx.shadowColor = '#66ccff'; ctx.shadowBlur = 22 * DPR; ctx.lineCap = 'round';
+    for (const [w, col] of [[5, '#bfe6ff'], [1.8, '#ffffff']]) {
+      ctx.strokeStyle = col; ctx.lineWidth = w * DPR;
+      ctx.beginPath();
+      b.pts.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y));
+      ctx.stroke();
+    }
+  }
+  ctx.globalAlpha = 1; ctx.shadowBlur = 0;
+  ctx.globalCompositeOperation = 'source-over';
+}
+
+// ================= MODE: Theremin =================
+let audio = null, osc = null, gain = null, thereminOn = false;
+function ensureAudio() {
+  if (audio) return;
+  audio = new (window.AudioContext || window.webkitAudioContext)();
+  osc = audio.createOscillator(); gain = audio.createGain();
+  osc.type = 'sawtooth'; gain.gain.value = 0;
+  const filt = audio.createBiquadFilter(); filt.type = 'lowpass'; filt.frequency.value = 1800;
+  osc.connect(filt); filt.connect(gain); gain.connect(audio.destination);
+  osc.start();
+}
+function thereminUpdate() {
+  if (!audio) return;
+  // rightmost hand on screen = pitch, other = volume
+  if (hands.length === 0) { gain.gain.setTargetAtTime(0, audio.currentTime, 0.08); return; }
+  const sorted = [...hands].sort((a, b) => b.x - a.x);
+  const ph = sorted[0], vh = sorted[1];
+  const freq = 110 * Math.pow(8, 1 - ph.y / H);          // 110Hz .. ~880Hz log
+  osc.frequency.setTargetAtTime(freq, audio.currentTime, 0.04);
+  const vol = vh ? Math.max(0, Math.min(1, 1 - vh.y / H)) * 0.25 : 0.15;
+  gain.gain.setTargetAtTime(vol, audio.currentTime, 0.06);
+}
+function thereminDraw(dt) {
+  if (!audio) return;
+  const sorted = [...hands].sort((a, b) => b.x - a.x);
+  ctx.globalCompositeOperation = 'lighter';
+  sorted.forEach((h, i) => {
+    const hue = i === 0 ? 160 : 280;
+    const r = h.size * (0.8 + 0.25 * Math.sin(performance.now() / 90));
+    ctx.strokeStyle = `hsl(${hue} 90% 65%)`; ctx.shadowColor = ctx.strokeStyle;
+    ctx.shadowBlur = 25 * DPR; ctx.lineWidth = 3 * DPR;
+    for (let k = 1; k <= 3; k++) {
+      ctx.globalAlpha = 1 - k * 0.25;
+      ctx.beginPath(); ctx.arc(h.x, h.y, r * k * 0.6, 0, Math.PI * 2); ctx.stroke();
+    }
+    if (Math.random() < 0.5) emit({ x: h.x, y: h.y, vx:(Math.random()-.5)*2, vy:(Math.random()-.5)*2, hue, decay: 1.5 });
+  });
+  ctx.globalAlpha = 1; ctx.shadowBlur = 0;
+  ctx.globalCompositeOperation = 'source-over';
+}
+
+// ================= MODE: Tiên Tôn =================
+const bgImg = new Image();
+bgImg.src = 'assets/desk_web.jpg';
+const personCv = document.createElement('canvas');
+const pctx = personCv.getContext('2d');
+let segReady = false, segBusy = false, seg = null;
+// anchor ngai vàng trong ảnh 1920x1080 (tâm chỗ ngồi) + cỡ người
+const THRONE = { x: 0.49, y: 0.45, h: 0.20 }; // toạ độ mặt bàn trong desk_bg
+let swords = [], mists = [], auraT = 0;
+let phase = 'normal', flash = 0, sceneT = 0, frameNo = 0; // normal = video thường, scene = thiên giới
+// xòe ✋ rồi nắm ✊ = độ kiếp / hoàn tục
+function togglePhase() {
+  phase = phase === 'normal' ? 'scene' : 'normal';
+  flash = 1.35; sceneT = 0; segReady = false;
+  hint.textContent = phase === 'scene'
+    ? '👑 Bệ hạ đã ngự... bàn làm việc — xòe ✋ nắm ✊ để về đi làm'
+    : '👑 Đã về trần làm việc — xòe ✋ nắm ✊ để lên thiên đình họp';
+}
+
+function ensureSeg() {
+  if (seg) return;
+  seg = new SelfieSegmentation({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation/${f}` });
+  seg.setOptions({ modelSelection: 1 });
+  seg.onResults(r => {
+    personCv.width = r.image.width; personCv.height = r.image.height;
+    pctx.clearRect(0, 0, personCv.width, personCv.height);
+    pctx.drawImage(r.segmentationMask, 0, 0);
+    pctx.globalCompositeOperation = 'source-in';
+    pctx.drawImage(r.image, 0, 0);
+    // mép dưới fade mờ dần để không bị cắt vuông
+    pctx.globalCompositeOperation = 'destination-out';
+    const fh = personCv.height;
+    const fade = pctx.createLinearGradient(0, fh * 0.8, 0, fh);
+    fade.addColorStop(0, 'rgba(0,0,0,0)'); fade.addColorStop(1, 'rgba(0,0,0,1)');
+    pctx.fillStyle = fade;
+    pctx.fillRect(0, fh * 0.8, personCv.width, fh * 0.2);
+    pctx.globalCompositeOperation = 'source-over';
+    segReady = true; segBusy = false;
+  });
+}
+// miệng 2 con rồng vàng trong ảnh nền (toạ độ tỉ lệ màn hình) + hướng phun
+const DRAGON_MOUTHS = [
+  { x: 0.425, y: 0.16, dx: 0.8, dy: 0.6 },    // rồng trái phun xuống-phải
+  { x: 0.63, y: 0.155, dx: -0.8, dy: 0.6 },   // rồng phải phun xuống-trái
+];
+// chim hạc tiên bay lượn
+let cranes = [];
+function spawnCrane() {
+  const fromLeft = Math.random() < 0.5;
+  cranes.push({
+    x: fromLeft ? -0.1 * W : 1.1 * W,
+    y: (0.08 + Math.random() * 0.22) * H,
+    vx: (fromLeft ? 1 : -1) * (1.6 + Math.random() * 1.6) * DPR,
+    s: (26 + Math.random() * 22) * DPR,     // sải cánh
+    t: Math.random() * 10
+  });
+}
+function drawCranes() {
+  ctx.save();
+  for (const c of cranes) {
+    const flap = Math.sin(c.t * 9);                    // vỗ cánh
+    const bob = Math.sin(c.t * 2.1) * 6 * DPR;         // dập dềnh
+    const dir = Math.sign(c.vx);
+    ctx.save();
+    ctx.translate(c.x, c.y + bob);
+    ctx.scale(dir, 1);
+    ctx.fillStyle = 'rgba(255,252,245,0.95)';
+    ctx.shadowColor = 'rgba(255,220,150,0.8)'; ctx.shadowBlur = 8 * DPR;
+    // thân + đuôi
+    ctx.beginPath();
+    ctx.ellipse(0, 0, c.s * 0.34, c.s * 0.10, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(-c.s * 0.30, 0); ctx.lineTo(-c.s * 0.55, -c.s * 0.07); ctx.lineTo(-c.s * 0.52, c.s * 0.05);
+    ctx.closePath(); ctx.fill();
+    // cổ dài + đầu + mỏ
+    ctx.strokeStyle = 'rgba(255,252,245,0.95)'; ctx.lineWidth = c.s * 0.06; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(c.s * 0.28, 0);
+    ctx.quadraticCurveTo(c.s * 0.5, -c.s * 0.10, c.s * 0.62, -c.s * 0.16); ctx.stroke();
+    ctx.beginPath(); ctx.arc(c.s * 0.63, -c.s * 0.17, c.s * 0.065, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#e8a33d';
+    ctx.beginPath();
+    ctx.moveTo(c.s * 0.69, -c.s * 0.17); ctx.lineTo(c.s * 0.80, -c.s * 0.145); ctx.lineTo(c.s * 0.69, -c.s * 0.12);
+    ctx.closePath(); ctx.fill();
+    // 2 cánh vỗ
+    ctx.fillStyle = 'rgba(255,252,245,0.92)';
+    for (const side of [-1, 1]) {
+      ctx.save();
+      ctx.rotate(side * (0.25 + flap * 0.55));
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.quadraticCurveTo(c.s * 0.1, -side * c.s * 0.5, -c.s * 0.18, -side * c.s * 0.72);
+      ctx.quadraticCurveTo(-c.s * 0.05, -side * c.s * 0.35, -c.s * 0.1, 0);
+      ctx.closePath(); ctx.fill();
+      ctx.restore();
+    }
+    ctx.restore();
+  }
+  ctx.restore();
+  ctx.shadowBlur = 0;
+}
+// hàng thần tử tiền cảnh dập đầu liên tục (silhouette ngược sáng, lệch pha)
+const BOWERS = [
+  { x: 0.10, y: 0.965, s: 0.155, ph: 0.00, flip: false },
+  { x: 0.21, y: 0.930, s: 0.125, ph: 0.35, flip: false },
+  { x: 0.30, y: 0.905, s: 0.100, ph: 0.62, flip: false },
+  { x: 0.90, y: 0.965, s: 0.155, ph: 0.18, flip: true },
+  { x: 0.79, y: 0.930, s: 0.125, ph: 0.50, flip: true },
+  { x: 0.70, y: 0.905, s: 0.100, ph: 0.80, flip: true },
+];
+function drawBowers(ox, oy, dw, dh) {
+  for (const b of BOWERS) {
+    const t = (sceneT * 0.45 + b.ph) % 1;                 // chu kỳ ~2.2s / lạy
+    const bow = 0.12 + 1.15 * (0.5 - 0.5 * Math.cos(t * Math.PI * 2)); // gập người 0.12→1.27 rad
+    const S = dh * b.s;                                    // chiều cao hình
+    const px = ox + dw * b.x, py = oy + dh * b.y;
+    ctx.save();
+    ctx.translate(px, py);
+    if (b.flip) ctx.scale(-1, 1);                          // bên phải quay mặt vào giữa
+    ctx.fillStyle = 'rgba(24,20,38,0.92)';
+    ctx.shadowColor = 'rgba(255,200,110,0.9)';             // viền rim-light vàng ngược sáng
+    ctx.shadowBlur = 10 * DPR;
+    // chân quỳ (khối tĩnh)
+    ctx.beginPath();
+    ctx.ellipse(0, -S * 0.06, S * 0.30, S * 0.11, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // thân + đầu xoay quanh hông về phía trước (hướng ngai)
+    ctx.rotate(-bow);
+    ctx.beginPath();                                       // thân áo choàng
+    ctx.moveTo(-S * 0.16, 0);
+    ctx.quadraticCurveTo(-S * 0.20, -S * 0.42, -S * 0.05, -S * 0.52);
+    ctx.quadraticCurveTo(S * 0.10, -S * 0.56, S * 0.13, -S * 0.34);
+    ctx.quadraticCurveTo(S * 0.15, -S * 0.12, S * 0.16, 0);
+    ctx.closePath(); ctx.fill();
+    ctx.beginPath();                                       // đầu + mũ quan
+    ctx.arc(S * 0.02, -S * 0.60, S * 0.105, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillRect(-S * 0.045, -S * 0.76, S * 0.13, S * 0.09);
+    // tay chắp vươn về trước khi lạy sâu
+    const reach = Math.min(1, bow / 1.1);
+    ctx.beginPath();
+    ctx.ellipse(S * (0.18 + 0.16 * reach), -S * 0.30, S * 0.17, S * 0.05, -0.12, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+  ctx.shadowBlur = 0;
+}
+function spawnSword() {
+  const fromLeft = Math.random() < 0.5;
+  const y = (0.05 + Math.random() * 0.3) * H;
+  swords.push({
+    x: fromLeft ? -0.1 * W : 1.1 * W, y,
+    vx: (fromLeft ? 1 : -1) * (500 + Math.random() * 700) * DPR / 60,
+    vy: (Math.random() - 0.3) * 3 * DPR,
+    len: (60 + Math.random() * 90) * DPR, hue: 40 + Math.random() * 15, a: 0.9
+  });
+}
+function tientonUpdate(dt) {
+  flash = Math.max(0, flash - dt * 1.2);
+  // thâu thiên địa: xòe ✋ rồi nắm ✊
+  for (const h of hands) {
+    if (prevGesture[h.label] === 'open' && h.gesture === 'fist') { togglePhase(); break; }
+  }
+  if (phase !== 'scene') return;
+  // rồng sau ngai thở lửa liên tục (2 miệng rồng trong ảnh nền)
+  for (const m of DRAGON_MOUTHS) {
+    for (let i = 0; i < 3; i++) {
+      const spread = (Math.random() - 0.5) * 0.9;
+      const sp = (2.5 + Math.random() * 3) * DPR;
+      emit({
+        x: W * m.x + (Math.random() - 0.5) * 8 * DPR,
+        y: H * m.y + (Math.random() - 0.5) * 8 * DPR,
+        vx: (m.dx * Math.cos(spread) - m.dy * Math.sin(spread)) * sp,
+        vy: (m.dx * Math.sin(spread) + m.dy * Math.cos(spread)) * sp - 0.4,
+        hue: 12 + Math.random() * 33, size: 3.5 + Math.random() * 4,
+        decay: 1.1 + Math.random() * 0.8, grav: -0.03
+      });
+    }
+  }
+  // chim hạc bay lượn
+  if (cranes.length < 3 && Math.random() < 0.008) spawnCrane();
+  for (const c of cranes) { c.x += c.vx * dt * 60; c.t += dt; }
+  cranes = cranes.filter(c => c.x > -0.15 * W && c.x < 1.15 * W);
+  sceneT += dt;
+  if (swords.length < 6 && Math.random() < 0.04) spawnSword();
+  for (const s of swords) { s.x += s.vx * dt * 60; s.y += s.vy * dt * 60; }
+  swords = swords.filter(s => s.x > -0.2 * W && s.x < 1.2 * W);
+  if (mists.length < 7) mists.push({
+    x: Math.random() * W, y: (0.75 + Math.random() * 0.25) * H,
+    r: (120 + Math.random() * 200) * DPR, vx: (Math.random() - 0.5) * 0.6 * DPR, a: 0.05 + Math.random() * 0.08
+  });
+  for (const m of mists) { m.x += m.vx * dt * 60; if (m.x < -m.r) m.x = W + m.r; if (m.x > W + m.r) m.x = -m.r; }
+  auraT += dt;
+  // hạt tiên khí bay lên quanh ngai
+  if (Math.random() < 0.4) {
+    const bx = W * THRONE.x + (Math.random() - 0.5) * 0.12 * W;
+    emit({ x: bx, y: H * (THRONE.y + 0.12), vx: (Math.random()-0.5)*0.5, vy: -0.8 - Math.random(), hue: 45, size: 1.8, decay: 0.7 });
+  }
+}
+function tientonDraw() {
+  if (phase !== 'scene') { // màn hình thường: chỉ vẽ lớp flash nếu đang chuyển cảnh
+    if (flash > 0) { ctx.fillStyle = `rgba(255,235,180,${flash})`; ctx.fillRect(0, 0, W, H); }
+    return;
+  }
+  // 1. bối cảnh tiên giới phủ toàn màn — Ken Burns: zoom + lia máy chậm cho cảnh "sống"
+  if (bgImg.complete && bgImg.naturalWidth) {
+    const kb = 1.06 + 0.025 * Math.sin(sceneT * 0.15);
+    const s = Math.max(W / bgImg.naturalWidth, H / bgImg.naturalHeight) * kb;
+    const dw = bgImg.naturalWidth * s, dh = bgImg.naturalHeight * s;
+    const ox = (W - dw) / 2 + Math.sin(sceneT * 0.11) * 0.012 * W;
+    const oy = (H - dh) / 2 + Math.cos(sceneT * 0.09) * 0.008 * H;
+    ctx.drawImage(bgImg, ox, oy, dw, dh);
+    // tia thần quang xoay sau ngai
+    const rx = ox + dw * THRONE.x, ry = oy + dh * (THRONE.y - 0.1);
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.translate(rx, ry);
+    for (let i = 0; i < 10; i++) {
+      const a = sceneT * 0.12 + (i / 10) * Math.PI * 2;
+      const grad = ctx.createLinearGradient(0, 0, Math.cos(a) * dh * 0.7, Math.sin(a) * dh * 0.7);
+      grad.addColorStop(0, 'rgba(255,220,140,0.10)'); grad.addColorStop(1, 'rgba(255,220,140,0)');
+      ctx.fillStyle = grad;
+      ctx.beginPath(); ctx.moveTo(0, 0);
+      ctx.arc(0, 0, dh * 0.7, a - 0.05, a + 0.05); ctx.closePath(); ctx.fill();
+    }
+    ctx.restore();
+    ctx.globalCompositeOperation = 'source-over';
+    // 2. hào quang sau lưng ngai
+    const tx = ox + dw * THRONE.x, ty = oy + dh * THRONE.y;
+    const glow = 0.55 + 0.2 * Math.sin(auraT * 2.2);
+    ctx.globalCompositeOperation = 'lighter';
+    const g = ctx.createRadialGradient(tx, ty, 0, tx, ty, dh * 0.16);
+    g.addColorStop(0, `rgba(255,215,120,${glow * 0.5})`);
+    g.addColorStop(1, 'rgba(255,180,60,0)');
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(tx, ty, dh * 0.16, 0, Math.PI * 2); ctx.fill();
+    ctx.globalCompositeOperation = 'source-over';
+    // 3. bệ hạ thu nhỏ ngồi trên ngai (mirror như soi gương)
+    if (segReady) {
+      const ph = dh * THRONE.h;
+      const pw = ph * personCv.width / personCv.height;
+      ctx.save();
+      ctx.translate(tx, ty - ph * 0.42);
+      ctx.scale(-1, 1); // mirror
+      ctx.drawImage(personCv, -pw / 2, 0, pw, ph);
+      ctx.restore();
+    } else {
+      ctx.fillStyle = 'rgba(255,230,170,.85)'; ctx.font = `${16 * DPR}px -apple-system`;
+      ctx.textAlign = 'center';
+      ctx.fillText('… đang triệu hồi chân thân …', tx, ty);
+    }
+    // 3b. hạc tiên bay lượn
+    drawCranes();
+  }
+  // 4. phi kiếm
+  ctx.globalCompositeOperation = 'lighter';
+  for (const s of swords) {
+    const ang = Math.atan2(s.vy, s.vx);
+    ctx.save(); ctx.translate(s.x, s.y); ctx.rotate(ang);
+    ctx.shadowColor = `hsl(${s.hue} 100% 60%)`; ctx.shadowBlur = 18 * DPR;
+    // vệt khí
+    const tr = ctx.createLinearGradient(-s.len * 2.2, 0, 0, 0);
+    tr.addColorStop(0, 'rgba(255,220,140,0)'); tr.addColorStop(1, `hsla(${s.hue} 100% 70% / .6)`);
+    ctx.fillStyle = tr; ctx.fillRect(-s.len * 2.2, -1.5 * DPR, s.len * 2.2, 3 * DPR);
+    // thân kiếm
+    ctx.fillStyle = '#fff7e0';
+    ctx.beginPath();
+    ctx.moveTo(s.len * 0.5, 0); ctx.lineTo(s.len * 0.28, -2.6 * DPR); ctx.lineTo(-s.len * 0.5, 0);
+    ctx.lineTo(s.len * 0.28, 2.6 * DPR); ctx.closePath(); ctx.fill();
+    ctx.restore();
+  }
+  // 5. mây sương trôi
+  for (const m of mists) {
+    ctx.globalAlpha = m.a;
+    const g = ctx.createRadialGradient(m.x, m.y, 0, m.x, m.y, m.r);
+    g.addColorStop(0, 'rgba(255,250,240,1)'); g.addColorStop(1, 'rgba(255,250,240,0)');
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(m.x, m.y, m.r, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.globalAlpha = 1; ctx.shadowBlur = 0;
+  ctx.globalCompositeOperation = 'source-over';
+  // 6. chớp sáng chuyển cảnh
+  if (flash > 0) { ctx.fillStyle = `rgba(255,235,180,${flash})`; ctx.fillRect(0, 0, W, H); }
+}
+
+// ================= Mode registry =================
+const MODES = [
+  { key:'magic',     icon:'🔮', name:'Magic',     hint:'Nắm tay ✊ rồi xòe ra ✋ để mở cổng Doctor Strange',
+    update: magicUpdate, draw: magicDraw },
+  { key:'fire',      icon:'🔥', name:'Fire',      hint:'Xòe bàn tay ✋ — lửa cháy trong lòng bàn tay',
+    update: fireUpdate, draw: () => {} },
+  { key:'particles', icon:'✨', name:'Particles', hint:'✋ pháo hoa · ☝️ vệt sao chổi · ✊ sóng xung kích',
+    update: particlesUpdate, draw: particlesDraw },
+  { key:'draw',      icon:'🎨', name:'Draw',      hint:'☝️ vẽ cầu vồng trên không · ✋ tẩy · phím C xóa hết',
+    update: drawUpdate, draw: drawDraw },
+  { key:'lightning', icon:'⚡', name:'Lightning', hint:'Giơ ✌️ để phóng sét từ đầu ngón tay',
+    update: lightningUpdate, draw: lightningDraw },
+  { key:'theremin',  icon:'🎵', name:'Theremin',  hint:'Tay phải: cao độ (lên cao = bổng) · Tay trái: âm lượng',
+    update: thereminUpdate, draw: thereminDraw },
+  { key:'tienton',   icon:'👑', name:'Tiên Tôn',  hint:'Xòe ✋ rồi nắm ✊ để độ kiếp bay về thiên giới',
+    update: tientonUpdate, draw: tientonDraw },
+];
+let mode = MODES[0];
+
+function setMode(m) {
+  mode = m;
+  parts = []; circles = []; bolts = []; shockwaves = []; lastPt = {};
+  if (m.key === 'tienton') ensureSeg();
+  if (m.key === 'theremin') { ensureAudio(); audio.resume(); }
+  else if (gain && audio) gain.gain.setTargetAtTime(0, audio.currentTime, 0.05);
+  hint.textContent = `${m.icon} ${m.name} — ${m.hint}`;
+  [...bar.children].forEach((b, i) => b.classList.toggle('on', MODES[i] === m));
+}
+MODES.forEach((m, i) => {
+  const b = document.createElement('button');
+  b.textContent = `${m.icon} ${m.name}`;
+  b.title = `Phím ${i + 1}`;
+  b.onclick = () => setMode(m);
+  bar.appendChild(b);
+});
+addEventListener('keydown', e => {
+  const i = +e.key - 1;
+  if (MODES[i]) setMode(MODES[i]);
+  if (e.key.toLowerCase() === 'c') dctx.clearRect(0, 0, W, H);
+});
+
+// ================= Loop =================
+let last = performance.now();
+function loop(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+  if (!mode.noCam && video.readyState >= 2) {
+    const vw = video.videoWidth, vh = video.videoHeight;
+    const s = Math.max(W / vw, H / vh), dw = vw * s, dh = vh * s;
+    ctx.save(); ctx.translate(W, 0); ctx.scale(-1, 1);
+    ctx.drawImage(video, (W - dw) / 2, (H - dh) / 2, dw, dh);
+    ctx.restore();
+  }
+
+  mode.update(dt);
+  mode.draw(dt);
+  drawParts(dt);
+
+  // remember gestures for edge detection
+  prevGesture = {};
+  for (const h of hands) prevGesture[h.label] = h.gesture;
 
   requestAnimationFrame(loop);
 }
@@ -410,23 +714,28 @@ requestAnimationFrame(loop);
 const mpHands = new Hands({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}` });
 mpHands.setOptions({ maxNumHands: 2, modelComplexity: 0, minDetectionConfidence: 0.6, minTrackingConfidence: 0.6 });
 mpHands.onResults(res => {
+  const prev = { ...prevGesture };
   hands = (res.multiHandLandmarks || []).map((lm, i) =>
     parseHand(lm, res.multiHandedness?.[i]?.label || String(i)));
+  // keep prevGesture from render loop; update handled there
 });
-
-let frameNo = 0;
 const camera = new Camera(video, {
   onFrame: async () => {
-    frameNo++;
-    if (frameNo % 2 === 0) {
-      if (!segBusy) { segBusy = true; await mpSeg.send({ image: video }); }
+    if (mode.key === 'tienton' && phase === 'scene') {
+      // trong triều: xen kẽ tách người / track tay (nhận ✋→✊ hoàn tục)
+      frameNo++;
+      if (frameNo % 2 === 0) {
+        if (seg && !segBusy) { segBusy = true; await seg.send({ image: video }); }
+      } else {
+        await mpHands.send({ image: video });
+      }
     } else {
       await mpHands.send({ image: video });
     }
   },
   width: 640, height: 480
 });
-camera.start().then(() => { hint.textContent = 'Giơ ☝️…🖐️ 1-5 ngón để triệu kiếm'; })
+camera.start().then(() => setMode(MODES[0]))
   .catch(err => { hint.textContent = 'Không bật được camera: ' + err.message; });
 </script>
 </body>
