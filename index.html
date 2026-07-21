@@ -375,7 +375,7 @@ const personCv = document.createElement('canvas');
 const pctx = personCv.getContext('2d');
 let segReady = false, segBusy = false, seg = null;
 // anchor ngai vàng trong ảnh 1920x1080 (tâm chỗ ngồi) + cỡ người
-const THRONE = { x: 0.508, y: 0.416, h: 0.17 }; // ngồi vào ghế đen trước ngai (desk_bg2)
+const THRONE = { x: 0.508, y: 0.40, h: 0.34, b: 0.615 }; // x=tâm ghế, b=đáy khung người (ghim sau bàn), h=chiều cao khung
 // các mảng cảnh vẽ ĐÈ lên người để người "ngồi sau bàn": mặt bàn+hộc tủ, màn hình, ly cà phê
 const DESK_OVERLAYS = [
   { x0: 0.390, y0: 0.475, x1: 0.615, y1: 0.650 },  // mặt bàn + hộc tủ (desk_bg2)
@@ -624,7 +624,7 @@ function tientonDraw() {
       const ph = dh * THRONE.h;
       const pw = ph * personCv.width / personCv.height;
       ctx.save();
-      ctx.translate(tx, ty - ph * 0.42);
+      ctx.translate(tx, oy + dh * THRONE.b - ph); // ghim ĐÁY khung vào sau mặt bàn, kéo người lên
       ctx.scale(-1, 1); // mirror
       ctx.drawImage(personCv, -pw / 2, 0, pw, ph);
       ctx.restore();
