@@ -10,6 +10,8 @@
   video { display:none; }
   canvas { position:absolute; inset:0; width:100%; height:100%; }
   #bar {
+    display:none;
+
     position:absolute; top:12px; left:50%; transform:translateX(-50%);
     display:flex; gap:8px; z-index:10;
     flex-wrap:wrap; justify-content:center; max-width:96vw;
@@ -776,7 +778,7 @@ const camera = new Camera(video, {
   },
   width: 640, height: 480
 });
-camera.start().then(() => setMode(MODES[0]))
+camera.start().then(() => setMode(MODES.find(m => m.key === 'tienton')))
   .catch(err => { hint.textContent = 'Không bật được camera: ' + err.message; });
 </script>
 </body>
