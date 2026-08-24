@@ -42,22 +42,13 @@ function resize() {
 addEventListener('resize', resize); resize();
 
 // ===================== Thế giới =====================
+// Bỏ hẳn "mặc đồ nhân vật" — mask/costume dán rời luôn lệch theo cử động thật (Leon chê).
+// Tạm thời: chỉ đổi NỀN + viền sáng bám mép người (lấy trực tiếp từ mask nên không
+// bao giờ lệch, vì không phải tài sản dán rời). Đang chờ Leon chốt hướng khác.
 const WORLDS = [
-  { id:'spider',
-    face:'assets/face_hero.jpg',   bg:'assets/bg_city.jpg',
-    suitDark:[0.04,0.07,0.34], suitLite:[0.96,0.11,0.13],
-    accent:[0.10,0.16,0.55], web:1.0,
-    edge:'255,190,130', spark:'255,205,150' },
-  { id:'oni',
-    face:'assets/face_demon.jpg',  bg:'assets/bg_void.jpg',
-    suitDark:[0.16,0.05,0.30], suitLite:[0.62,0.30,0.98],
-    accent:[0.95,0.75,0.20], web:0.0,
-    edge:'210,165,255', spark:'215,175,255' },
-  { id:'dragon',
-    face:'assets/face_dragon.jpg', bg:'assets/bg_void.jpg',
-    suitDark:[0.30,0.17,0.02], suitLite:[1.00,0.75,0.22],
-    accent:[0.90,0.35,0.05], web:0.0,
-    edge:'255,220,160', spark:'255,225,170' },
+  { id:'ember',  bg:'assets/bg_city.jpg', tint:[1.00,0.55,0.30], edge:'255,190,130', spark:'255,205,150' },
+  { id:'violet', bg:'assets/bg_void.jpg', tint:[0.62,0.35,0.98], edge:'210,165,255', spark:'215,175,255' },
+  { id:'gold',   bg:'assets/bg_void.jpg', tint:[1.00,0.75,0.25], edge:'255,220,160', spark:'255,225,170' },
 ];
 let worldIdx = 0;
 
@@ -68,62 +59,41 @@ const VS = `#version 300 es
 in vec2 p; out vec2 v;
 void main(){ v = p*0.5+0.5; gl_Position = vec4(p,0.,1.); }`;
 
-// Toàn bộ phép biến hình diễn ra ở đây: người -> nhân vật, nền -> thế giới khác
+// Người giữ NGUYÊN pixel thật (không dán costume/mặt nạ rời — luôn khớp vì
+// chẳng có gì cần khớp). Chỉ đổi nền + viền sáng bám mép người lấy trực tiếp
+// từ mask, nên viền không bao giờ trôi khỏi silhouette dù cử động thế nào.
 const FS = `#version 300 es
 precision highp float;
 in vec2 v; out vec4 o;
-uniform sampler2D uCam, uMask, uBg, uFace;
-uniform mat3  uFaceM;        // uv màn hình -> uv ảnh mặt nạ
-uniform vec3  uDark, uLite, uAccent;
-uniform vec2  uBgFit;        // hệ số "cover" cho ảnh nền
-uniform vec3  uBody;         // tâm x,y + cỡ người (suy từ khuôn mặt)
-uniform float uWeb, uTime, uFaceOn;
-
-float luma(vec3 c){ return dot(c, vec3(0.299,0.587,0.114)); }
-
-// mạng nhện thủ tục — neo vào NGƯỜI và co giãn theo cỡ người, không dính màn hình
-float webPat(vec2 uv){
-  vec2 q = (uv - uBody.xy) / max(uBody.z, 0.02);
-  float r = length(q), a = atan(q.y, q.x);
-  float rings  = abs(fract(r*9.0) - 0.5);
-  float spokes = abs(fract(a*16.0/6.2831) - 0.5);
-  return 1.0 - smoothstep(0.0, 0.030, min(rings*1.1, spokes*r*2.6));
-}
+uniform sampler2D uCam, uMask, uBg;
+uniform vec2  uBgFit;      // hệ số "cover" cho ảnh nền
+uniform vec2  uPixel;      // 1 texel của mask, để dò mép người
+uniform vec3  uTint;
+uniform float uTime;
 
 void main(){
   vec2 uv = vec2(1.0 - v.x, 1.0 - v.y);            // soi gương + lật dọc cho khớp video
   vec3 cam = texture(uCam, uv).rgb;
   float person = texture(uMask, uv).r;
-  person = smoothstep(0.35, 0.65, person);          // mép người gọn lại
+  float personA = smoothstep(0.35, 0.65, person);
 
   // --- nền: thế giới khác ---
   vec2 buv = (uv - 0.5) * uBgFit + 0.5;
   vec3 bg = texture(uBg, vec2(buv.x, 1.0 - buv.y)).rgb;
   bg *= 0.55 + 0.45 * smoothstep(1.0, 0.0, length(uv-0.5));   // tối bốn góc
 
-  // --- người: giữ nguyên sáng tối THẬT, thay chất liệu -> vẫn bám đúng cử động ---
-  float l = luma(cam);
-  vec3 suit = mix(uDark, uLite, smoothstep(0.06, 0.80, l));
-  float w = webPat(uv) * uWeb;
-  suit = mix(suit, suit*0.30, w*0.85);                        // chỉ mạng nhện tối
-  suit += uAccent * smoothstep(0.62,0.98,l) * 0.30;           // bắt sáng
-  suit *= 0.60 + 0.75*l;                                      // giữ khối sáng-tối thật
+  vec3 col = mix(bg, cam, personA);
 
-  vec3 col = mix(bg, suit, person);
+  // --- viền sáng bám sát mép người: đạo hàm ngay trên mask, không phải asset dán rời ---
+  vec2 px = uPixel * 3.0;
+  float mL = texture(uMask, uv - vec2(px.x,0.0)).r, mR = texture(uMask, uv + vec2(px.x,0.0)).r;
+  float mT = texture(uMask, uv - vec2(0.0,px.y)).r, mB = texture(uMask, uv + vec2(0.0,px.y)).r;
+  float edge = smoothstep(0.25, 0.6, abs(mL-mR) + abs(mT-mB));
+  col += uTint * edge * (0.65 + 0.35*sin(uTime*7.0));
 
-  // --- mặt nạ: dán theo ma trận tư thế đầu nên quay đầu vẫn khớp ---
-  vec2 fuv = (uFaceM * vec3(uv, 1.0)).xy;
-  if (uFaceOn > 0.5) {
-    // vùng đặc của mặt nạ = ellipse nằm gọn trong đầu -> nền đen không lọt ra,
-    // và mặt thật KHÔNG xuyên qua được
-    vec2 d = (fuv - vec2(0.5, 0.47)) / vec2(0.235, 0.455);
-    float a = 1.0 - smoothstep(0.80, 1.0, length(d));
-    if (a > 0.001) {
-      vec4 fm = texture(uFace, clamp(fuv, 0.001, 0.999));
-      vec3 fl = fm.rgb * (0.45 + 0.85*l);                     // ăn sáng của cảnh thật
-      col = mix(col, fl, a);
-    }
-  }
+  // --- nhuộm nhẹ toàn cảnh cho có cảm giác "khác chiều không gian" ---
+  col = mix(col, col * (vec3(1.0)+uTint) * 0.6, 0.14);
+
   o = vec4(col, 1.0);
 }`;
 
@@ -141,9 +111,8 @@ gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 3,-1, -1,3]), gl.STATIC_
 const pl = gl.getAttribLocation(prog, 'p');
 gl.enableVertexAttribArray(pl); gl.vertexAttribPointer(pl, 2, gl.FLOAT, false, 0, 0);
 const U = n => gl.getUniformLocation(prog, n);
-const uni = { faceM:U('uFaceM'), dark:U('uDark'), lite:U('uLite'), accent:U('uAccent'),
-  bgFit:U('uBgFit'), body:U('uBody'), web:U('uWeb'), time:U('uTime'), faceOn:U('uFaceOn') };
-gl.uniform1i(U('uCam'),0); gl.uniform1i(U('uMask'),1); gl.uniform1i(U('uBg'),2); gl.uniform1i(U('uFace'),3);
+const uni = { bgFit:U('uBgFit'), pixel:U('uPixel'), tint:U('uTint'), time:U('uTime') };
+gl.uniform1i(U('uCam'),0); gl.uniform1i(U('uMask'),1); gl.uniform1i(U('uBg'),2);
 
 function mkTex(unit){ const t = gl.createTexture();
   gl.activeTexture(gl.TEXTURE0+unit); gl.bindTexture(gl.TEXTURE_2D, t);
@@ -152,7 +121,7 @@ function mkTex(unit){ const t = gl.createTexture();
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
   return t; }
-const texCam = mkTex(0), texBg = mkTex(2), texFace = mkTex(3), blank1 = mkTex(1);
+const texCam = mkTex(0), texBg = mkTex(2), blank1 = mkTex(1);
 gl.activeTexture(gl.TEXTURE1);
 gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,1,1,0,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array([0,0,0,255]));
 
@@ -171,16 +140,14 @@ function loadTex(unit, tex, src, onload){
 let bgAspect = 0.667;
 function applyWorld(){
   const w = WORLDS[worldIdx];
-  loadTex(3, texFace, w.face);
   loadTex(2, texBg, w.bg, im => { bgAspect = im.naturalWidth/im.naturalHeight; });
   gl.useProgram(prog);
-  gl.uniform3fv(uni.dark, w.suitDark); gl.uniform3fv(uni.lite, w.suitLite);
-  gl.uniform3fv(uni.accent, w.accent); gl.uniform1f(uni.web, w.web);
+  gl.uniform3fv(uni.tint, w.tint);
 }
 
 // ===================== Mô hình =====================
-let hand = null, faceLm = null, seg = null, ready = false;
-let hands = [], head = null, maskTex = null;
+let hand = null, seg = null, ready = false;
+let hands = [], maskTex = null;
 
 // 17MB model mà máy chủ chỉ cho cache 1 giờ -> tự giữ lại, lần sau mở là có ngay
 async function modelBuf(url){
@@ -203,9 +170,7 @@ async function initModels(){
   hand = await Vision.HandLandmarker.createFromOptions(fs, { canvas: glc, runningMode:'VIDEO', numHands:2,
     minHandDetectionConfidence:0.25, minHandPresenceConfidence:0.25, minTrackingConfidence:0.25,
     baseOptions:{ delegate:'GPU', modelAssetBuffer: await modelBuf(M+'hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task') }});
-  faceLm = await Vision.FaceLandmarker.createFromOptions(fs, { canvas: glc, runningMode:'VIDEO', numFaces:1,
-    outputFaceBlendshapes:false, outputFacialTransformationMatrixes:true,
-    baseOptions:{ delegate:'GPU', modelAssetBuffer: await modelBuf(M+'face_landmarker/face_landmarker/float16/1/face_landmarker.task') }});
+  // FaceLandmarker đã bỏ cùng mặt nạ — mở lại khi có hướng mới cần khoá mặt (xem git history commit b8b785d)
   seg = await Vision.ImageSegmenter.createFromOptions(fs, { canvas: glc, runningMode:'VIDEO',
     outputConfidenceMasks:true, outputCategoryMask:false,
     baseOptions:{ delegate:'GPU', modelAssetBuffer: await modelBuf(M+'image_segmenter/selfie_segmenter/float16/1/selfie_segmenter.tflite') }});
@@ -364,17 +329,6 @@ function drawRibbon(){
 
 // ===================== Lớp thế giới (GL) =====================
 // ma trận: uv màn hình -> uv ảnh mặt nạ, dựng từ tư thế đầu THẬT
-function faceMatrix(){
-  if (!head) return null;
-  const { cx, cy, ex, ey, r00, r01, r10, r11 } = head;
-  const a = r00*ex, b = r10*ex, c = r01*ey, d = r11*ey;
-  const det = a*d - b*c;
-  if (!isFinite(det) || Math.abs(det) < 1e-6) return null;
-  const ia = d/det, ib = -b/det, ic = -c/det, id = a/det;
-  return new Float32Array([ ia, ib, 0,  ic, id, 0,
-    0.5 - (ia*cx + ic*cy), 0.5 - (ib*cx + id*cy), 1 ]);
-}
-
 function renderWorld(){
   if (!VW) return;
   if (glc.width !== VW || glc.height !== VH) { glc.width = VW; glc.height = VH; }
@@ -383,14 +337,9 @@ function renderWorld(){
   pushTex(0, texCam, video);
   gl.activeTexture(gl.TEXTURE1);
   gl.bindTexture(gl.TEXTURE_2D, maskTex || blank1);
-  const m = faceMatrix();
-  gl.uniform1f(uni.faceOn, m ? 1 : 0);
-  if (m) gl.uniformMatrix3fv(uni.faceM, false, m);
   const va = VW/VH, Z = 0.72;   // zoom nền để không lộ viền khung tranh
   gl.uniform2f(uni.bgFit, (va > bgAspect ? 1 : bgAspect/va)*Z, (va > bgAspect ? va/bgAspect : 1)*Z);
-  // neo mạng nhện vào thân người: dưới mặt một quãng, cỡ suy từ khoảng cách mắt
-  if (head) gl.uniform3f(uni.body, head.cx, head.cy + head.ey*0.95, head.ex*2.6);
-  else      gl.uniform3f(uni.body, 0.5, 0.62, 0.45);
+  gl.uniform2f(uni.pixel, 1/VW, 1/VH);
   gl.uniform1f(uni.time, tSec);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
 }
@@ -431,33 +380,18 @@ function frame(now){
   hasNewFrame = false;
 
   const src = video;   // nạp thẳng từ video, không blit qua canvas
-  const ts = ++tsCounter;
+  // MediaPipe dùng chung một đồng hồ mốc thời gian cho mọi task trong cùng WASM module
+  // (không phải mỗi task một đồng hồ riêng) -> mỗi lệnh gọi PHẢI lấy mốc mới, không
+  // được dùng lại cùng một số cho hai task khác nhau trong cùng khung.
   if (fresh) try {
-    readHands(hand.detectForVideo(handInput(), ts));
-    // mặt + tách người chỉ chạy khi dải đang mở, và LUÂN PHIÊN nhau từng khung:
-    // ngón tay phải bám sát từng khung, còn mặt/dáng người đổi chậm nên 15Hz là đủ
-    const need = alive > 0.02 || hands.length >= 2;
-    const ph = tsCounter % 2;
-    if (need && ph === 0) {
-      const fr = faceLm.detectForVideo(src, ts);
-      const Mx = fr.facialTransformationMatrixes && fr.facialTransformationMatrixes[0];
-      const lm = fr.faceLandmarks && fr.faceLandmarks[0];
-      if (Mx && lm) {
-        const d = Mx.data;                             // cột-chính 4x4
-        const eL = lm[33], eR = lm[263];
-        const cx = 1 - (eL.x+eR.x)/2, cy = (eL.y+eR.y)/2 - 0.03;
-        const span = Math.hypot(eR.x-eL.x, eR.y-eL.y);
-        const s = Math.max(0.02, span*3.5);
-        head = { cx, cy, ex:s, ey:s*(VW/VH), r00:d[0], r01:-d[4], r10:-d[1], r11:d[5] };
-      } else head = null;
-    }
-    if (need && ph === 1) {
-      seg.segmentForVideo(src, ts, r => {
+    readHands(hand.detectForVideo(handInput(), ++tsCounter));
+    // tách người chỉ chạy khi dải đang mở/sắp mở — model rẻ (<1ms) nên chạy mỗi khung
+    if (alive > 0.02 || hands.length >= 2) {
+      seg.segmentForVideo(src, ++tsCounter, r => {
         const mk = r.confidenceMasks && r.confidenceMasks[0];
         if (mk) maskTex = mk.getAsWebGLTexture();
       });
     }
-    if (!need) { head = null; }
   } catch(e){ /* một khung lỗi thì bỏ qua, không giết vòng chạy */ }
 
   updateRibbon(dt);
