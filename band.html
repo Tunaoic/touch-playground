@@ -182,34 +182,34 @@ function applyWorld(){
 let hand = null, faceLm = null, seg = null, ready = false;
 let hands = [], head = null, maskTex = null;
 
+// 17MB model mà máy chủ chỉ cho cache 1 giờ -> tự giữ lại, lần sau mở là có ngay
+async function modelBuf(url){
+  try {
+    const c = await caches.open('mp-tasks-v1');
+    let r = await c.match(url);
+    if (!r) { await c.add(url); r = await c.match(url); }
+    if (r) return new Uint8Array(await r.arrayBuffer());
+  } catch(e){ /* cache hỏng thì tải thẳng */ }
+  return new Uint8Array(await (await fetch(url)).arrayBuffer());
+}
+
 async function initModels(){
-  const { FilesetResolver, HandLandmarker, FaceLandmarker, ImageSegmenter } = Vision;
+  const { FilesetResolver } = Vision;
   const fs = await FilesetResolver.forVisionTasks(
     'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/wasm');
-  const M = 'https://storage.googleapis.com/mediapipe-models/';
-  // canvas: glc -> cả ba model dùng CHUNG context của mình, lấy được mask dạng texture
+  const M = 'https://storage.googleapis.com/mediapipe-models/';  // canvas: glc -> cả ba model dùng CHUNG context của mình, lấy được mask dạng texture
   hand = await Vision.HandLandmarker.createFromOptions(fs, { canvas: glc, runningMode:'VIDEO', numHands:2,
     minHandDetectionConfidence:0.5, minHandPresenceConfidence:0.5, minTrackingConfidence:0.5,
-    baseOptions:{ delegate:'GPU', modelAssetPath: M+'hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task' }});
+    baseOptions:{ delegate:'GPU', modelAssetBuffer: await modelBuf(M+'hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task') }});
   faceLm = await Vision.FaceLandmarker.createFromOptions(fs, { canvas: glc, runningMode:'VIDEO', numFaces:1,
     outputFaceBlendshapes:false, outputFacialTransformationMatrixes:true,
-    baseOptions:{ delegate:'GPU', modelAssetPath: M+'face_landmarker/face_landmarker/float16/1/face_landmarker.task' }});
+    baseOptions:{ delegate:'GPU', modelAssetBuffer: await modelBuf(M+'face_landmarker/face_landmarker/float16/1/face_landmarker.task') }});
   seg = await Vision.ImageSegmenter.createFromOptions(fs, { canvas: glc, runningMode:'VIDEO',
     outputConfidenceMasks:true, outputCategoryMask:false,
-    baseOptions:{ delegate:'GPU', modelAssetPath: M+'image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite' }});
+    baseOptions:{ delegate:'GPU', modelAssetBuffer: await modelBuf(M+'image_segmenter/selfie_segmenter/float16/1/selfie_segmenter.tflite') }});
   ready = true;
 }
 
-// đầu vào model: 432px là điểm ngọt đo được (nhanh nhất mà bắt tay tốt nhất)
-const IN_W = 432;
-const inCv = document.createElement('canvas'); const inCtx = inCv.getContext('2d');
-function modelInput(){
-  if (!VW) return video;
-  const w = IN_W, h = Math.max(1, Math.round(IN_W*VH/VW));
-  if (inCv.width !== w || inCv.height !== h) { inCv.width = w; inCv.height = h; }
-  inCtx.drawImage(video, 0, 0, w, h);
-  return inCv;
-}
 
 // ---- One Euro Filter: chuẩn khử rung landmark trong AR ----
 function OneEuro(minCut=1.2, beta=0.5, dCut=1.0){
@@ -395,19 +395,33 @@ function renderWorld(){
 
 // ===================== Vòng chạy =====================
 let last = performance.now(), tsCounter = 0;
+let hasNewFrame = true, lastVFC = 0;
+if (video.requestVideoFrameCallback) {
+  const tick = () => { hasNewFrame = true; lastVFC = performance.now();
+                       video.requestVideoFrameCallback(tick); };
+  video.requestVideoFrameCallback(tick);
+}
+
 function frame(now){
   requestAnimationFrame(frame);
   const dt = Math.min(0.05, (now-last)/1000); last = now;
   if (!ready || video.readyState < 2) return;
   if (!VW) { VW = video.videoWidth; VH = video.videoHeight; }
   if (!VW) return;
+  // chỉ chạy model khi có khung camera mới; nhưng nếu rVFC im quá 0,4s (trình duyệt
+  // không hỗ trợ / bị bóp) thì vẫn chạy, để app không bao giờ đứng hình
+  const fresh = hasNewFrame || (now - lastVFC > 400);
+  hasNewFrame = false;
 
-  const src = modelInput();
+  const src = video;   // nạp thẳng từ video, không blit qua canvas
   const ts = ++tsCounter;
-  try {
+  if (fresh) try {
     readHands(hand.detectForVideo(src, ts));
-    // mặt + tách người chỉ chạy khi dải đang mở -> tiết kiệm khi không dùng
-    if (alive > 0.02 || hands.length >= 2) {
+    // mặt + tách người chỉ chạy khi dải đang mở, và LUÂN PHIÊN nhau từng khung:
+    // ngón tay phải bám sát từng khung, còn mặt/dáng người đổi chậm nên 15Hz là đủ
+    const need = alive > 0.02 || hands.length >= 2;
+    const ph = tsCounter % 2;
+    if (need && ph === 0) {
       const fr = faceLm.detectForVideo(src, ts);
       const Mx = fr.facialTransformationMatrixes && fr.facialTransformationMatrixes[0];
       const lm = fr.faceLandmarks && fr.faceLandmarks[0];
@@ -419,11 +433,14 @@ function frame(now){
         const s = Math.max(0.02, span*3.5);
         head = { cx, cy, ex:s, ey:s*(VW/VH), r00:d[0], r01:-d[4], r10:-d[1], r11:d[5] };
       } else head = null;
+    }
+    if (need && ph === 1) {
       seg.segmentForVideo(src, ts, r => {
         const mk = r.confidenceMasks && r.confidenceMasks[0];
         if (mk) maskTex = mk.getAsWebGLTexture();
       });
     }
+    if (!need) { head = null; }
   } catch(e){ /* một khung lỗi thì bỏ qua, không giết vòng chạy */ }
 
   updateRibbon(dt);
