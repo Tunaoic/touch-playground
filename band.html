@@ -131,7 +131,15 @@ function lerpA(a, b, t) { return a + (b - a) * t; }
 function update(dt) {
   tSec += dt;
   const two = hands.length >= 2;
-  alive += ((two ? 1 : 0) - alive) * Math.min(1, dt * (two ? 14 : 8));
+  // hai tay chụm sát nhau -> chưa có dải; KÉO RA thì dải mới hiện (đúng nhịp ref)
+  let gate = 0;
+  if (two) {
+    const [p0, q0] = [...hands].sort((x, y) => x.grip.x - y.grip.x);
+    const d = Math.hypot(q0.grip.x - p0.grip.x, q0.grip.y - p0.grip.y) / W;
+    const u = Math.max(0, Math.min(1, (d - 0.10) / 0.12));
+    gate = u * u * (3 - 2 * u);
+  }
+  alive += (gate - alive) * Math.min(1, dt * (gate > alive ? 14 : 8));
 
   if (two) {
     hadHands = true;
