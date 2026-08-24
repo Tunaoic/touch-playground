@@ -135,10 +135,11 @@ function update(dt) {
   let gate = 0;
   if (two) {
     const [p0, q0] = [...hands].sort((x, y) => x.grip.x - y.grip.x);
-    const d = Math.hypot(q0.grip.x - p0.grip.x, q0.grip.y - p0.grip.y) / W;
+    const d = Math.hypot(q0.grip.x - p0.grip.x, q0.grip.y - p0.grip.y) / Math.max(1, W);
     const u = Math.max(0, Math.min(1, (d - 0.10) / 0.12));
     gate = u * u * (3 - 2 * u);
   }
+  if (!(alive >= 0)) alive = 0;                       // chống NaN khi khung hình cỡ 0
   alive += (gate - alive) * Math.min(1, dt * (gate > alive ? 14 : 8));
 
   if (two) {
