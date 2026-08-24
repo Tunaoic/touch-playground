@@ -26,10 +26,12 @@ const canvas = document.getElementById('canvas');
 const ctx    = canvas.getContext('2d');
 
 let W = 0, H = 0, DPR = Math.min(devicePixelRatio, 1.25);
+const WS = 0.6;   // 'thế giới bên kia' dựng ở 60% -> nhẹ máy (dải lấy mẫu qua buffer nên không thấy khác)
 function resize() {
   W = canvas.width  = Math.round(innerWidth  * DPR);
   H = canvas.height = Math.round(innerHeight * DPR);
-  world.width = W; world.height = H;
+  world.width  = Math.max(2, Math.round(W * WS));
+  world.height = Math.max(2, Math.round(H * WS));
 }
 // "thế giới bên kia" — camera đã độ + mặt nạ bám mặt thật
 const world = document.createElement('canvas');
@@ -137,8 +139,8 @@ function update(dt) {
     if (!A) { A = { ...p.grip }; B = { ...q.grip }; rollA = p.roll; rollB = q.roll; }
     A.x = lerpA(A.x, p.grip.x, k); A.y = lerpA(A.y, p.grip.y, k);
     B.x = lerpA(B.x, q.grip.x, k); B.y = lerpA(B.y, q.grip.y, k);
-    rollA = lerpA(rollA, p.roll, Math.min(1, dt * 12));
-    rollB = lerpA(rollB, q.roll, Math.min(1, dt * 12));
+    rollA = lerpA(rollA, p.roll, Math.min(1, dt * 8));
+    rollB = lerpA(rollB, q.roll, Math.min(1, dt * 8));
   } else if (hadHands && alive < 0.05) {
     themeIdx = (themeIdx + 1) % THEMES.length;   // mất tay -> đổi thế giới
     hadHands = false; A = B = null;
@@ -150,7 +152,7 @@ function update(dt) {
 
 // ================= Thế giới bên kia =================
 function drawWorld(th) {
-  wctx.setTransform(1, 0, 0, 1, 0, 0);
+  wctx.setTransform(WS, 0, 0, WS, 0, 0);
   wctx.clearRect(0, 0, W, H);
   if (video.readyState < 2) return;
   const vw = video.videoWidth, vh = video.videoHeight;
@@ -240,7 +242,7 @@ function drawRibbon() {
   bctx.scale(bw / len, bh / maxH);
   bctx.rotate(-ang);
   bctx.translate(-mx, -my);
-  bctx.drawImage(world, 0, 0);
+  bctx.drawImage(world, 0, 0, W, H);
   bctx.restore();
 
   // khung bao của dải (đã xoay) + lề cho quầng sáng
