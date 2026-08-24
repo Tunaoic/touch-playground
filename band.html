@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Dải Băng Ánh Sáng</title>
+<style>
+  html, body { margin:0; padding:0; background:#000; height:100%; overflow:hidden; }
+  #stage { position:relative; width:100vw; height:100vh; }
+  video { display:none; }
+  canvas { position:absolute; inset:0; width:100%; height:100%; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <video id="video" playsinline></video>
+  <canvas id="canvas"></canvas>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+<script>
+const video  = document.getElementById('video');
+const canvas = document.getElementById('canvas');
+const ctx    = canvas.getContext('2d');
+
+let W = 0, H = 0, DPR = Math.min(devicePixelRatio, 1.5);
+function resize() { W = canvas.width = innerWidth * DPR; H = canvas.height = innerHeight * DPR; }
+addEventListener('resize', resize); resize();
+
+// ================= Artworks =================
+const ART_SRCS = ['assets/band_hero.jpg', 'assets/band_demon.jpg', 'assets/band_dragon.jpg'];
+const arts = ART_SRCS.map(s => { const i = new Image(); i.src = s; return i; });
+let artIdx = 0;
+
+// ================= Hands =================
+let hands = [];
+function parseHand(lm, label) {
+  const wrist = lm[0], midMcp = lm[9];
+  const base = Math.hypot(wrist.x - midMcp.x, wrist.y - midMcp.y) || 1e-6;
+  const pinchD = Math.hypot(lm[4].x - lm[8].x, lm[4].y - lm[8].y);
+  const pinch = pinchD < base * 0.5;
+  const P = p => ({ x: (1 - p.x) * W, y: p.y * H });
+  const grip = P({ x: (lm[4].x + lm[8].x) / 2, y: (lm[4].y + lm[8].y) / 2 });
+  return { grip, pinch, label, size: base * H };
+}
+
+// ================= Band state =================
+// hai đầu dải = điểm nhúm ngón 2 tay; alpha ease theo việc cả 2 tay có nhúm không
+let a1 = null, a2 = null;      // anchor đã smooth
+let alpha = 0, wasOn = false, sparkT = 0;
+let parts = [];
+const glowCv = (() => {
+  const c = document.createElement('canvas'); c.width = c.height = 64;
+  const cc = c.getContext('2d');
+  const g = cc.createRadialGradient(32, 32, 0, 32, 32, 32);
+  g.addColorStop(0, 'hsl(45 100% 92%)'); g.addColorStop(0.4, 'hsl(40 100% 65%)');
+  g.addColorStop(1, 'hsl(40 100% 50% / 0)');
+  cc.fillStyle = g; cc.fillRect(0, 0, 64, 64);
+  return c;
+})();
+
+function update(dt) {
+  const pinched = hands.filter(h => h.pinch);
+  const on = pinched.length >= 2;
+  alpha += ((on ? 1 : 0) - alpha) * Math.min(1, dt * (on ? 7 : 5));
+  if (alpha < 0.02 && wasOn) { artIdx = (artIdx + 1) % arts.length; wasOn = false; } // đổi art sau khi tắt
+  if (on) wasOn = true;
+
+  if (on) {
+    const [p, q] = pinched.sort((x, y) => x.grip.x - y.grip.x);
+    const k = Math.min(1, dt * 14);
+    if (!a1) { a1 = { ...p.grip }; a2 = { ...q.grip }; }
+    a1.x += (p.grip.x - a1.x) * k; a1.y += (p.grip.y - a1.y) * k;
+    a2.x += (q.grip.x - a2.x) * k; a2.y += (q.grip.y - a2.y) * k;
+  }
+  if (alpha < 0.02) { a1 = a2 = null; }
+
+  // hạt sáng bắn ra 2 đầu dải
+  sparkT -= dt;
+  if (alpha > 0.5 && a1 && sparkT <= 0) {
+    sparkT = 0.05;
+    for (const e of [a1, a2]) {
+      const ang = Math.random() * Math.PI * 2, v = 0.6 + Math.random() * 1.6;
+      parts.push({ x: e.x, y: e.y, vx: Math.cos(ang) * v, vy: Math.sin(ang) * v, life: 1 });
+    }
+  }
+  for (const s of parts) { s.life -= dt * 2; s.x += s.vx * dt * 60; s.y += s.vy * dt * 60; }
+  parts = parts.filter(s => s.life > 0);
+}
+
+function draw() {
+  if (!(alpha > 0.02 && a1 && a2)) return;
+  const img = arts[artIdx];
+  if (!img.complete || !img.naturalWidth) return;
+  const dx = a2.x - a1.x, dy = a2.y - a1.y;
+  const len = Math.max(Math.hypot(dx, dy), 40 * DPR);
+  const ang = Math.atan2(dy, dx);
+  const h = Math.min(Math.max(len * 0.30, 70 * DPR), 230 * DPR);
+  const mx = (a1.x + a2.x) / 2, my = (a1.y + a2.y) / 2;
+  const wob = Math.sin(performance.now() / 260) * 0.015; // rung nhẹ cho "sống"
+
+  ctx.save();
+  ctx.translate(mx, my);
+  ctx.rotate(ang + wob);
+  ctx.globalAlpha = alpha;
+
+  // vệt sáng phía sau (aura)
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.globalAlpha = alpha * 0.35;
+  ctx.drawImage(glowCv, -len / 2 - 30 * DPR, -h / 2 - 30 * DPR, len + 60 * DPR, h + 60 * DPR);
+
+  // artwork
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.globalAlpha = alpha;
+  ctx.drawImage(img, -len / 2, -h / 2, len, h);
+
+  // viền glow trên dưới
+  ctx.globalCompositeOperation = 'lighter';
+  const edge = ctx.createLinearGradient(-len / 2, 0, len / 2, 0);
+  edge.addColorStop(0, 'rgba(255,220,140,0)');
+  edge.addColorStop(0.12, 'rgba(255,230,170,.9)');
+  edge.addColorStop(0.88, 'rgba(255,230,170,.9)');
+  edge.addColorStop(1, 'rgba(255,220,140,0)');
+  ctx.fillStyle = edge;
+  ctx.globalAlpha = alpha * (0.75 + 0.25 * Math.sin(performance.now() / 150));
+  ctx.fillRect(-len / 2, -h / 2 - 2.5 * DPR, len, 3 * DPR);
+  ctx.fillRect(-len / 2, h / 2 - 0.5 * DPR, len, 3 * DPR);
+  ctx.restore();
+
+  // hạt sáng 2 đầu
+  ctx.globalCompositeOperation = 'lighter';
+  for (const s of parts) {
+    ctx.globalAlpha = s.life * alpha;
+    const r = 5 * DPR * s.life;
+    ctx.drawImage(glowCv, s.x - r, s.y - r, r * 2, r * 2);
+  }
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = 'source-over';
+}
+
+// ================= Loop =================
+let last = performance.now();
+function loop(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+  if (video.readyState >= 2) {
+    const vw = video.videoWidth, vh = video.videoHeight;
+    const s = Math.max(W / vw, H / vh), dw = vw * s, dh = vh * s;
+    ctx.save(); ctx.translate(W, 0); ctx.scale(-1, 1);
+    ctx.drawImage(video, (W - dw) / 2, (H - dh) / 2, dw, dh);
+    ctx.restore();
+  }
+  update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+
+// ================= MediaPipe (non-blocking + watchdog) =================
+const mpHands = new Hands({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}` });
+mpHands.setOptions({ maxNumHands: 2, modelComplexity: 0, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
+mpHands.onResults(res => {
+  handsBusy = false;
+  hands = (res.multiHandLandmarks || []).map((lm, i) =>
+    parseHand(lm, res.multiHandedness?.[i]?.label || String(i)));
+});
+let handsBusy = false, handsBusyT = 0;
+const camera = new Camera(video, {
+  onFrame: async () => {
+    const now = performance.now();
+    if (handsBusy && now - handsBusyT > 2000) handsBusy = false; // watchdog chống treo
+    if (!handsBusy) {
+      handsBusy = true; handsBusyT = now;
+      mpHands.send({ image: video }).catch(() => {}).finally(() => { handsBusy = false; });
+    }
+  },
+  width: 640, height: 480
+});
+camera.start();
+</script>
+</body>
+</html>
