@@ -103,13 +103,11 @@ function parseHand(lm, label) {
   // hiệu chuẩn: nhớ mức xoè lớn nhất từng thấy (rỉ dần để không kẹt)
   const key = label || '0';
   refRatio[key] = Math.max(ratio, (refRatio[key] || 0.72) * 0.997);
-  // *1.3: chỉ khi tay thật sự quay nghiêng cạnh dải mới mảnh lại, cầm hờ vẫn mở hết
-  let c = Math.min(1, (ratio / Math.max(0.45, refRatio[key])) * 1.3);   // |cos(roll)|
+  let c = Math.min(1, ratio / Math.max(0.5, refRatio[key]));   // |cos(roll)|
   // mặt lòng bàn tay hay mu bàn tay? -> dấu của tích có hướng 2D
-  const ax = i5.x - w.x, ay = i5.y - w.y, bx = p17.x - w.x, by = p17.y - w.y;
-  const cross = ax * by - ay * bx;
-  const chir  = (label === 'Right') ? 1 : -1;
-  const sign  = (cross * chir) >= 0 ? 1 : -1;
+  // dấu ngửa/úp lấy từ ĐỘ SÂU z của hai mép lòng bàn tay — nhãn Left/Right của model
+  // đo trên chính video ref thì sai loạn, không dùng được
+  const sign = ((i5.z ?? 0) - (p17.z ?? 0)) >= 0 ? 1 : -1;
   const roll  = Math.acos(Math.max(-1, Math.min(1, c * sign)));  // 0 = ngửa, π = úp
   const ix = P(lm[L.IX_TIP]);
   return {
@@ -120,36 +118,65 @@ function parseHand(lm, label) {
 }
 
 // ================= Ribbon state =================
-let A = null, B = null, rollA = 0, rollB = 0;  // hai đầu dải đã làm mượt
+// Đo trên chính video ref: 30fps liên tục vẫn mất tay tới 11 khung liền (~0,37s),
+// và nhãn Left/Right của model sai loạn. Nên: gán tay theo VỊ TRÍ GẦN NHẤT,
+// và GIỮ NEO khi mất tay trong thời gian ân hạn thay vì tắt dải ngay.
+const GRACE = 0.55;                       // giây được phép mất tay mà dải vẫn sống
+let A = null, B = null, rollA = 0, rollB = 0;
+let seenA = 0, seenB = 0;                 // lần cuối mỗi đầu được cập nhật (giây)
 let alive = 0, hadHands = false, sparks = [], tSec = 0;
+
+function bindHands() {
+  if (!hands.length) return;
+  if (hands.length >= 2) {
+    const [p, q] = [...hands].sort((x, y) => x.grip.x - y.grip.x);
+    // nếu đã có neo cũ thì chọn cách ghép gần nhất, tránh hai đầu nhảy chéo nhau
+    if (A && B) {
+      const straight = Math.hypot(p.grip.x - A.x, p.grip.y - A.y) + Math.hypot(q.grip.x - B.x, q.grip.y - B.y);
+      const swapped  = Math.hypot(q.grip.x - A.x, q.grip.y - A.y) + Math.hypot(p.grip.x - B.x, p.grip.y - B.y);
+      return swapped < straight ? [q, p] : [p, q];
+    }
+    return [p, q];
+  }
+  // chỉ một tay: gắn vào đầu nào gần nó hơn, đầu kia giữ nguyên chỗ cũ
+  const h = hands[0];
+  if (!A || !B) return null;
+  const dA = Math.hypot(h.grip.x - A.x, h.grip.y - A.y);
+  const dB = Math.hypot(h.grip.x - B.x, h.grip.y - B.y);
+  return dA <= dB ? [h, null] : [null, h];
+}
 
 function lerpA(a, b, t) { return a + (b - a) * t; }
 
 function update(dt) {
   tSec += dt;
-  const two = hands.length >= 2;
-  // hai tay chụm sát nhau -> chưa có dải; KÉO RA thì dải mới hiện (đúng nhịp ref)
+  const pair = bindHands();
+  const k = Math.min(1, dt * 22);
+
+  if (pair) {
+    const [p, q] = pair;
+    if (!A && p) { A = { ...p.grip }; rollA = p.roll; }
+    if (!B && q) { B = { ...q.grip }; rollB = q.roll; }
+    if (p && A) { A.x = lerpA(A.x, p.grip.x, k); A.y = lerpA(A.y, p.grip.y, k);
+                  rollA = lerpA(rollA, p.roll, Math.min(1, dt * 8)); seenA = tSec; }
+    if (q && B) { B.x = lerpA(B.x, q.grip.x, k); B.y = lerpA(B.y, q.grip.y, k);
+                  rollB = lerpA(rollB, q.roll, Math.min(1, dt * 8)); seenB = tSec; }
+  }
+
+  // dải sống khi CẢ HAI đầu còn trong thời gian ân hạn (bắc cầu qua lúc model mất tay)
+  const fresh = A && B && (tSec - seenA) < GRACE && (tSec - seenB) < GRACE;
   let gate = 0;
-  if (two) {
-    const [p0, q0] = [...hands].sort((x, y) => x.grip.x - y.grip.x);
-    const d = Math.hypot(q0.grip.x - p0.grip.x, q0.grip.y - p0.grip.y) / Math.max(1, W);
+  if (fresh) {
+    const d = Math.hypot(B.x - A.x, B.y - A.y) / Math.max(1, W);
     const u = Math.max(0, Math.min(1, (d - 0.10) / 0.12));
     gate = u * u * (3 - 2 * u);
+    hadHands = true;
   }
-  if (!(alive >= 0)) alive = 0;                       // chống NaN khi khung hình cỡ 0
+  if (!(alive >= 0)) alive = 0;
   alive += (gate - alive) * Math.min(1, dt * (gate > alive ? 14 : 8));
 
-  if (two) {
-    hadHands = true;
-    const [p, q] = [...hands].sort((x, y) => x.grip.x - y.grip.x);
-    const k = Math.min(1, dt * 18);
-    if (!A) { A = { ...p.grip }; B = { ...q.grip }; rollA = p.roll; rollB = q.roll; }
-    A.x = lerpA(A.x, p.grip.x, k); A.y = lerpA(A.y, p.grip.y, k);
-    B.x = lerpA(B.x, q.grip.x, k); B.y = lerpA(B.y, q.grip.y, k);
-    rollA = lerpA(rollA, p.roll, Math.min(1, dt * 8));
-    rollB = lerpA(rollB, q.roll, Math.min(1, dt * 8));
-  } else if (hadHands && alive < 0.05) {
-    themeIdx = (themeIdx + 1) % THEMES.length;   // mất tay -> đổi thế giới
+  if (!fresh && hadHands && alive < 0.05) {
+    themeIdx = (themeIdx + 1) % THEMES.length;   // hạ tay hẳn -> đổi thế giới
     hadHands = false; A = B = null;
   }
 
@@ -387,6 +414,27 @@ mpFace.onResults(r => {
 
 // gửi frame KHÔNG chặn (mỗi model một cờ + watchdog) — tránh treo pipeline
 let hBusy = false, hT = 0, fBusy = false, fT = 0, frameNo = 0;
+// --- chế độ thử: ?src=<file> nạp video thay webcam để soi tracking thật ---
+const TEST_SRC = new URLSearchParams(location.search).get('src');
+if (TEST_SRC) {
+  video.src = TEST_SRC; video.loop = true; video.muted = true; video.playsInline = true;
+  video.play().catch(()=>{});
+  const pump = async () => {
+    if (video.readyState >= 2) {
+      const now = performance.now();
+      if (hBusy && now - hT > 1500) hBusy = false;
+      if (fBusy && now - fT > 1500) fBusy = false;
+      frameNo++;
+      if (!hBusy) { hBusy = true; hT = now;
+        mpHands.send({ image: video }).catch(()=>{}).finally(()=>{ hBusy = false; }); }
+      if (handsWarm && frameNo % 2 === 0 && !fBusy) { fBusy = true; fT = now;
+        mpFace.send({ image: video }).catch(()=>{}).finally(()=>{ fBusy = false; }); }
+    }
+    requestAnimationFrame(pump);
+  };
+  pump();
+}
+
 const camera = new Camera(video, {
   onFrame: async () => {
     const now = performance.now();
@@ -404,7 +452,7 @@ const camera = new Camera(video, {
   },
   width: 640, height: 480
 });
-camera.start().catch(e => console.warn('camera:', e && e.message));
+if (!TEST_SRC) camera.start().catch(e => console.warn('camera:', e && e.message));
 addEventListener('click', () => { themeIdx = (themeIdx + 1) % THEMES.length; });
 </script>
 </body>
