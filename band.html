@@ -59,9 +59,9 @@ const VS = `#version 300 es
 in vec2 p; out vec2 v;
 void main(){ v = p*0.5+0.5; gl_Position = vec4(p,0.,1.); }`;
 
-// Người giữ NGUYÊN pixel thật (không dán costume/mặt nạ rời — luôn khớp vì
-// chẳng có gì cần khớp). Chỉ đổi nền + viền sáng bám mép người lấy trực tiếp
-// từ mask, nên viền không bao giờ trôi khỏi silhouette dù cử động thế nào.
+// "Chế độ nhìn năng lượng" ngay trên PIXEL NGƯỜI THẬT (không dán costume/mặt nạ
+// rời — luôn khớp vì biến đổi thẳng trên chính họ, không phải asset cần căn theo).
+// Viền + nền đều lấy tín hiệu trực tiếp từ mask/thời gian nên luôn "sống".
 const FS = `#version 300 es
 precision highp float;
 in vec2 v; out vec4 o;
@@ -71,28 +71,49 @@ uniform vec2  uPixel;      // 1 texel của mask, để dò mép người
 uniform vec3  uTint;
 uniform float uTime;
 
+float luma(vec3 c){ return dot(c, vec3(0.299,0.587,0.114)); }
+float hash(vec2 p){ return fract(sin(dot(p, vec2(41.3,289.1)))*43758.5453); }
+float noise(vec2 p){
+  vec2 i=floor(p), f=fract(p);
+  float a=hash(i), b=hash(i+vec2(1.0,0.0)), c=hash(i+vec2(0.0,1.0)), d=hash(i+vec2(1.0,1.0));
+  vec2 u=f*f*(3.0-2.0*f);
+  return mix(mix(a,b,u.x), mix(c,d,u.x), u.y);
+}
+
 void main(){
   vec2 uv = vec2(1.0 - v.x, 1.0 - v.y);            // soi gương + lật dọc cho khớp video
   vec3 cam = texture(uCam, uv).rgb;
-  float person = texture(uMask, uv).r;
-  float personA = smoothstep(0.35, 0.65, person);
+  float mask = texture(uMask, uv).r;
+  float personA = smoothstep(0.35, 0.65, mask);
 
-  // --- nền: thế giới khác ---
-  vec2 buv = (uv - 0.5) * uBgFit + 0.5;
-  vec3 bg = texture(uBg, vec2(buv.x, 1.0 - buv.y)).rgb;
-  bg *= 0.55 + 0.45 * smoothstep(1.0, 0.0, length(uv-0.5));   // tối bốn góc
-
-  vec3 col = mix(bg, cam, personA);
-
-  // --- viền sáng bám sát mép người: đạo hàm ngay trên mask, không phải asset dán rời ---
+  // mép người: dùng chung cho viền ngoài lẫn ép sáng bên trong -> đọc như "đường năng lượng"
   vec2 px = uPixel * 3.0;
   float mL = texture(uMask, uv - vec2(px.x,0.0)).r, mR = texture(uMask, uv + vec2(px.x,0.0)).r;
   float mT = texture(uMask, uv - vec2(0.0,px.y)).r, mB = texture(uMask, uv + vec2(0.0,px.y)).r;
-  float edge = smoothstep(0.25, 0.6, abs(mL-mR) + abs(mT-mB));
-  col += uTint * edge * (0.65 + 0.35*sin(uTime*7.0));
+  float edge = smoothstep(0.20, 0.55, abs(mL-mR) + abs(mT-mB));
+  // dòng chảy dọc viền: điều biến theo vị trí+thời gian, không nhấp nháy đều một nhịp
+  float flow = 0.55 + 0.45*sin(uv.x*24.0 + uv.y*17.0 - uTime*3.2 + noise(uv*6.0+uTime*0.4)*4.0);
 
-  // --- nhuộm nhẹ toàn cảnh cho có cảm giác "khác chiều không gian" ---
-  col = mix(col, col * (vec3(1.0)+uTint) * 0.6, 0.14);
+  // --- nền: đổi thế giới, có lia+zoom chậm (Ken Burns) + xoáy năng lượng thủ tục ---
+  float zoom = 1.0 + 0.05*sin(uTime*0.11);
+  vec2 pan = vec2(sin(uTime*0.07), cos(uTime*0.05)) * 0.02;
+  vec2 buv = (uv - 0.5 + pan) * uBgFit * zoom + 0.5;
+  vec3 bg = texture(uBg, vec2(buv.x, 1.0 - buv.y)).rgb;
+  bg *= 0.55 + 0.45 * smoothstep(1.0, 0.0, length(uv-0.5));    // tối bốn góc
+  bg += uTint * noise(uv*3.0 + vec2(uTime*0.05, -uTime*0.03)) * 0.10;
+
+  // --- người: giữ khối sáng-tối THẬT nhưng đổi hẳn chất liệu -> hologram/nhiệt ảnh ---
+  float l = luma(cam);
+  vec3 dark = uTint * 0.10;
+  vec3 bright = mix(uTint, vec3(1.0), 0.45);
+  vec3 person = mix(dark, bright, smoothstep(0.04, 0.92, l));
+  person *= 0.86 + 0.14*sin(uv.y*760.0 - uTime*7.0);           // dòng quét ngang kiểu hologram
+  person += uTint * edge * flow * 1.4;                         // viền trong rực theo dòng chảy
+  person = mix(cam*0.18 + person*0.82, person, 0.85);          // chừa chút bóng thật cho có khối
+
+  vec3 col = mix(bg, person, personA);
+  col += uTint * edge * flow * 0.9;                            // hào quang tràn ra ngoài silhouette
+  col = mix(col, col * (vec3(1.0)+uTint) * 0.6, 0.12);         // nhuộm nhẹ cho "khác chiều không gian"
 
   o = vec4(col, 1.0);
 }`;
@@ -195,6 +216,7 @@ function OneEuro(minCut=1.2, beta=0.5, dCut=1.0){
 // ===================== Dải =====================
 const GRACE = 0.55;
 let A=null, B=null, rollA=0, rollB=0, seenA=0, seenB=0;
+let ambient=[];   // hạt năng lượng trôi lơ lửng trong dải khi mở, cho nền/viền "sống"
 let alive=0, hadHands=false, sparks=[], tSec=0;
 let fA = { x:OneEuro(), y:OneEuro() }, fB = { x:OneEuro(), y:OneEuro() };
 const lerpA = (a,b,t) => a + (b-a)*t;
@@ -252,11 +274,22 @@ function updateRibbon(dt){
   alive += (gate-alive) * Math.min(1, dt*(gate>alive?14:8));
   if (!fresh && hadHands && alive < 0.05) {
     worldIdx = (worldIdx+1) % WORLDS.length; applyWorld();
-    hadHands = false; A = B = null;
+    hadHands = false; A = B = null; ambient = [];
     fA = { x:OneEuro(), y:OneEuro() }; fB = { x:OneEuro(), y:OneEuro() };
   }
   for (const s of sparks){ s.life -= dt*1.8; s.x += s.vx*dt*60; s.y += s.vy*dt*60; }
   sparks = sparks.filter(s=>s.life>0);
+
+  // hạt năng lượng lơ lửng bên trong dải khi mở — trôi chậm lên trên, đổi hướng nhẹ
+  if (alive > 0.15 && A && B && ambient.length < 26 && Math.random() < 0.5) {
+    const t = Math.random(), x = lerpA(A.x,B.x,t) + (Math.random()-0.5)*40*DPR;
+    const y = Math.max(A.y,B.y) + Math.random()*60*DPR;
+    ambient.push({ x, y, vx:(Math.random()-0.5)*0.25, vy:-(0.4+Math.random()*0.7),
+                    life:1, decay:0.16+Math.random()*0.12, sway:Math.random()*6.283 });
+  }
+  for (const p of ambient){ p.life -= dt*p.decay; p.sway += dt*2;
+    p.x += (p.vx + Math.sin(p.sway)*0.3) * dt*60; p.y += p.vy*dt*60; }
+  ambient = ambient.filter(p=>p.life>0);
 }
 
 const radCache = {};
@@ -298,6 +331,14 @@ function drawRibbon(){
   ctx.save(); ctx.rotate(-ang); ctx.translate(-mx,-my);
   ctx.globalAlpha = alive;
   ctx.drawImage(glc, 0, 0, W, H);
+  // hạt năng lượng lơ lửng — vẽ NGAY TRONG vùng clip của dải, không tràn ra ngoài
+  ctx.globalCompositeOperation = 'lighter';
+  for (const p of ambient) {
+    ctx.globalAlpha = Math.min(p.life, 1-p.life+0.4) * alive * 0.8;
+    const r = 3.5*DPR*(0.5+p.life*0.5);
+    ctx.drawImage(radial(w.spark), p.x-r, p.y-r, r*2, r*2);
+  }
+  ctx.globalCompositeOperation = 'source-over';
   ctx.restore();
   let i0=0;
   while (i0 < SLICES){
