@@ -426,7 +426,7 @@ const camera = new Camera(video, {
   },
   width: 640, height: 480
 });
-camera.start();
+camera.start().catch(e => console.warn('camera:', e && e.message));
 addEventListener('click', () => { themeIdx = (themeIdx + 1) % THEMES.length; });
 </script>
 </body>
