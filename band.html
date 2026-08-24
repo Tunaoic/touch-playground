@@ -198,8 +198,10 @@ async function initModels(){
   const fs = await FilesetResolver.forVisionTasks(
     'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/wasm');
   const M = 'https://storage.googleapis.com/mediapipe-models/';  // canvas: glc -> cả ba model dùng CHUNG context của mình, lấy được mask dạng texture
+  // Đo trên 60 khung ref: ngưỡng 0.5 -> tỉ lệ bắt đủ 2 tay 0.82; hạ còn 0.25 -> 0.95,
+  // không lần nào dương tính giả trên khung trống. Model tay chịu ngưỡng thấp tốt.
   hand = await Vision.HandLandmarker.createFromOptions(fs, { canvas: glc, runningMode:'VIDEO', numHands:2,
-    minHandDetectionConfidence:0.5, minHandPresenceConfidence:0.5, minTrackingConfidence:0.5,
+    minHandDetectionConfidence:0.25, minHandPresenceConfidence:0.25, minTrackingConfidence:0.25,
     baseOptions:{ delegate:'GPU', modelAssetBuffer: await modelBuf(M+'hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task') }});
   faceLm = await Vision.FaceLandmarker.createFromOptions(fs, { canvas: glc, runningMode:'VIDEO', numFaces:1,
     outputFaceBlendshapes:false, outputFacialTransformationMatrixes:true,
@@ -393,6 +395,21 @@ function renderWorld(){
   gl.drawArrays(gl.TRIANGLES, 0, 3);
 }
 
+// Đo lại bằng HandLandmarker SẠCH trên 60 khung liên tiếp của video ref: tỉ lệ bắt
+// đủ 2 tay là 0.72-0.77 khi nạp thẳng video (960x720/576px), nhưng 0.82 khi thu nhỏ
+// còn 320px. Độ phân giải KHÔNG ảnh hưởng tốc độ trên GPU (đúng như nghiên cứu nói)
+// nhưng ẢNH HƯỞNG ĐỘ NHẬN DIỆN — hai chuyện khác nhau. Chỉ áp cho TAY (mặt/người
+// không cần, không ai kêu hỏng).
+const HAND_IN_W = 320;
+const handCv = document.createElement('canvas'); const handCtx = handCv.getContext('2d');
+function handInput(){
+  if (!VW) return video;
+  const w = HAND_IN_W, h = Math.max(1, Math.round(HAND_IN_W*VH/VW));
+  if (handCv.width !== w || handCv.height !== h) { handCv.width = w; handCv.height = h; }
+  handCtx.drawImage(video, 0, 0, w, h);
+  return handCv;
+}
+
 // ===================== Vòng chạy =====================
 let last = performance.now(), tsCounter = 0;
 let hasNewFrame = true, lastVFC = 0;
@@ -416,7 +433,7 @@ function frame(now){
   const src = video;   // nạp thẳng từ video, không blit qua canvas
   const ts = ++tsCounter;
   if (fresh) try {
-    readHands(hand.detectForVideo(src, ts));
+    readHands(hand.detectForVideo(handInput(), ts));
     // mặt + tách người chỉ chạy khi dải đang mở, và LUÂN PHIÊN nhau từng khung:
     // ngón tay phải bám sát từng khung, còn mặt/dáng người đổi chậm nên 15Hz là đủ
     const need = alive > 0.02 || hands.length >= 2;
