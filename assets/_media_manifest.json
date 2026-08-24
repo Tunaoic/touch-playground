@@ -1,5 +1,4 @@
 {
-  "face_hero": "face_hero.jpg",
-  "face_demon": "face_demon.jpg",
-  "face_dragon": "face_dragon.jpg"
+  "bg_city": "bg_city.jpg",
+  "bg_void": "bg_void.jpg"
 }
