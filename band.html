@@ -412,6 +412,20 @@ mpFace.onResults(r => {
   }
 });
 
+// Đo thật trên máy này: Hands tốn 19ms/khung ở 576px nhưng chỉ 10,6ms ở 320px
+// với tỉ lệ bắt tay tương đương -> luôn cho model ăn bản thu nhỏ.
+const IN_W = 320;
+const inCv = document.createElement('canvas');
+const inCtx = inCv.getContext('2d');
+function modelInput() {
+  const vw = video.videoWidth, vh = video.videoHeight;
+  if (!vw || !vh) return video;
+  const w = IN_W, h = Math.max(1, Math.round(IN_W * vh / vw));
+  if (inCv.width !== w || inCv.height !== h) { inCv.width = w; inCv.height = h; }
+  inCtx.drawImage(video, 0, 0, w, h);
+  return inCv;
+}
+
 // gửi frame KHÔNG chặn (mỗi model một cờ + watchdog) — tránh treo pipeline
 let hBusy = false, hT = 0, fBusy = false, fT = 0, frameNo = 0;
 // --- chế độ thử: ?src=<file> nạp video thay webcam để soi tracking thật ---
@@ -426,9 +440,9 @@ if (TEST_SRC) {
       if (fBusy && now - fT > 1500) fBusy = false;
       frameNo++;
       if (!hBusy) { hBusy = true; hT = now;
-        mpHands.send({ image: video }).catch(()=>{}).finally(()=>{ hBusy = false; }); }
+        mpHands.send({ image: modelInput() }).catch(()=>{}).finally(()=>{ hBusy = false; }); }
       if (handsWarm && frameNo % 2 === 0 && !fBusy) { fBusy = true; fT = now;
-        mpFace.send({ image: video }).catch(()=>{}).finally(()=>{ fBusy = false; }); }
+        mpFace.send({ image: modelInput() }).catch(()=>{}).finally(()=>{ fBusy = false; }); }
     }
     requestAnimationFrame(pump);
   };
@@ -443,11 +457,11 @@ const camera = new Camera(video, {
     frameNo++;
     if (!hBusy) {
       hBusy = true; hT = now;
-      mpHands.send({ image: video }).catch(() => {}).finally(() => { hBusy = false; });
+      mpHands.send({ image: modelInput() }).catch(() => {}).finally(() => { hBusy = false; });
     }
     if (handsWarm && frameNo % 3 === 0 && !fBusy) {   // mặt đổi chậm -> 1/3 nhịp là đủ
       fBusy = true; fT = now;
-      mpFace.send({ image: video }).catch(() => {}).finally(() => { fBusy = false; });
+      mpFace.send({ image: modelInput() }).catch(() => {}).finally(() => { fBusy = false; });
     }
   },
   width: 640, height: 480
