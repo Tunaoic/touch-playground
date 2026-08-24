@@ -105,8 +105,9 @@ function parseHand(lm, label) {
   const ratio    = palmW / handLen;
   // hiệu chuẩn: nhớ mức xoè lớn nhất từng thấy (rỉ dần để không kẹt)
   const key = label || '0';
-  refRatio[key] = Math.max(ratio, (refRatio[key] || 0.72) * 0.999);
-  let c = Math.min(1, ratio / Math.max(0.45, refRatio[key]));   // |cos(roll)|
+  refRatio[key] = Math.max(ratio, (refRatio[key] || 0.72) * 0.997);
+  // *1.3: chỉ khi tay thật sự quay nghiêng cạnh dải mới mảnh lại, cầm hờ vẫn mở hết
+  let c = Math.min(1, (ratio / Math.max(0.45, refRatio[key])) * 1.3);   // |cos(roll)|
   // mặt lòng bàn tay hay mu bàn tay? -> dấu của tích có hướng 2D
   const ax = i5.x - w.x, ay = i5.y - w.y, bx = p17.x - w.x, by = p17.y - w.y;
   const cross = ax * by - ay * bx;
