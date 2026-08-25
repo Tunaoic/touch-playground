@@ -64,6 +64,45 @@ void main(){ v = p*0.5+0.5; gl_Position = vec4(p,0.,1.); }`;
 
 function sh(type, src){ const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
   if(!gl.getShaderParameter(s, gl.COMPILE_STATUS)) console.error(gl.getShaderInfoLog(s)); return s; }
+
+// --- BEAUTY: làm mịn da nhẹ kiểu edge-aware (giữ biên mắt/tóc/viền sắc, chỉ mịn vùng da
+// phẳng màu) trên camera THẬT, trước khi dùng cho MỌI nơi hiển thị (trong dải lẫn ngoài
+// dải). Là bộ lọc ảnh thuần (input=output cùng hệ toạ độ, KHÔNG tự mirror) — mirror vẫn
+// do các pass sau (FRESH, BLIT) tự lo như cũ, tránh lệch hệ toạ độ giữa cam và mask.
+const FS_BEAUTY = `#version 300 es
+precision highp float;
+in vec2 v; out vec4 o;
+uniform sampler2D uSrc;
+uniform vec2 uPixel;
+void main(){
+  vec3 c0 = texture(uSrc, v).rgb;
+  vec3 sum = vec3(0.0); float wsum = 0.0;
+  for (int dy=-1; dy<=1; dy++){
+    for (int dx=-1; dx<=1; dx++){
+      vec2 off = vec2(float(dx), float(dy)) * uPixel * 2.2;
+      vec3 c = texture(uSrc, v+off).rgb;
+      float d = length(c - c0);
+      float w = exp(-d*d / 0.018);          // càng khác màu càng ít đóng góp -> giữ biên
+      sum += c * w; wsum += w;
+    }
+  }
+  vec3 smoothed = sum / max(wsum, 1e-4);
+  vec3 col = mix(c0, smoothed, 0.55);        // hoà 1 phần với gốc, tránh trông "nhựa"
+  col = col * 1.035 + vec3(0.010, 0.004, 0.0);   // sáng nhẹ + ấm nhẹ, tông da hồng hào hơn
+  col = clamp((col - 0.5) * 1.03 + 0.5, 0.0, 1.0);
+  o = vec4(col, 1.0);
+}`;
+
+// --- BLIT: hiện camera đã beauty khi dải ĐÓNG (không qua pipeline 6-pass) — tự mirror y
+// hệt FS_FRESH để nhất quán, để Canvas2D luôn lấy nội dung "đã mirror đúng" từ glc.
+const FS_BLIT = `#version 300 es
+precision highp float;
+in vec2 v; out vec4 o;
+uniform sampler2D uSrc;
+void main(){
+  o = texture(uSrc, vec2(1.0 - v.x, 1.0 - v.y));
+}`;
+
 function compileProgram(fsSrc){
   const p = gl.createProgram();
   gl.attachShader(p, sh(gl.VERTEX_SHADER, VS));
@@ -217,16 +256,21 @@ void main(){
   o = vec4(col, 1.0);
 }`;
 
+const progBeauty  = compileProgram(FS_BEAUTY);
+const progBlit    = compileProgram(FS_BLIT);
 const progFresh   = compileProgram(FS_FRESH);
 const progCombine = compileProgram(FS_COMBINE);
 const progBright  = compileProgram(FS_BRIGHT);
 const progBlur    = compileProgram(FS_BLUR);
 const progPresent = compileProgram(FS_PRESENT);
+const uBeauty  = locs(progBeauty,  ['uPixel']);
 const uFresh   = locs(progFresh,   ['uBgFit','uPixel','uTint','uTime','uTurb']);
 const uCombine = locs(progCombine, ['uDecay','uDrift','uZoom','uKick']);
 const uBlur    = locs(progBlur,    ['uTexel','uDir']);
 const uPresent = locs(progPresent, ['uTime']);
 // sampler unit cố định, gán 1 lần — không đổi theo khung
+gl.useProgram(progBeauty);  gl.uniform1i(gl.getUniformLocation(progBeauty,'uSrc'),0);
+gl.useProgram(progBlit);    gl.uniform1i(gl.getUniformLocation(progBlit,'uSrc'),0);
 gl.useProgram(progFresh);   gl.uniform1i(gl.getUniformLocation(progFresh,'uCam'),0);
                              gl.uniform1i(gl.getUniformLocation(progFresh,'uMask'),1);
                              gl.uniform1i(gl.getUniformLocation(progFresh,'uBg'),2);
@@ -289,7 +333,7 @@ function resizeFBO(o, w, h){
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
   o.w = w; o.h = h;
 }
-let fboFresh=null, trail=[null,null], trailRead=0, bloomBright=null, bloomBlurA=null, bloomBlurB=null;
+let fboFresh=null, trail=[null,null], trailRead=0, bloomBright=null, bloomBlurA=null, bloomBlurB=null, fboBeauty=null;
 let pipeW=0, pipeH=0;
 function resetTrail(){
   if (!trail[0]) return;
@@ -304,11 +348,11 @@ function ensurePipeline(w, h){
   pipeW = w; pipeH = h;
   const bw = Math.max(2, w>>2), bh = Math.max(2, h>>2);
   if (!fboFresh) {
-    fboFresh = createFBO(w,h);
+    fboFresh = createFBO(w,h); fboBeauty = createFBO(w,h);
     trail = [createFBO(w,h), createFBO(w,h)];
     bloomBright = createFBO(bw,bh); bloomBlurA = createFBO(bw,bh); bloomBlurB = createFBO(bw,bh);
   } else {
-    resizeFBO(fboFresh, w, h); resizeFBO(trail[0], w, h); resizeFBO(trail[1], w, h);
+    resizeFBO(fboFresh, w, h); resizeFBO(fboBeauty, w, h); resizeFBO(trail[0], w, h); resizeFBO(trail[1], w, h);
     resizeFBO(bloomBright, bw, bh); resizeFBO(bloomBlurA, bw, bh); resizeFBO(bloomBlurB, bw, bh);
   }
   resetTrail();
@@ -370,6 +414,7 @@ function OneEuro(minCut=1.2, beta=0.5, dCut=1.0){
 // ===================== Dải =====================
 const GRACE = 0.55;
 let A=null, B=null, rollA=0, rollB=0, seenA=0, seenB=0;
+let rawA=null, rawB=null, velA={x:0,y:0}, velB={x:0,y:0}, lastDetectT=0;   // ngoại suy chuyển động giữa các lần model tay chạy
 let ambient=[];   // hạt năng lượng trôi lơ lửng trong dải khi mở, cho nền/viền "sống"
 let alive=0, hadHands=false, sparks=[], tSec=0;
 let fA = { x:OneEuro(2.2,0.9,1.0), y:OneEuro(2.2,0.9,1.0) }, fB = { x:OneEuro(2.2,0.9,1.0), y:OneEuro(2.2,0.9,1.0) };
@@ -411,8 +456,10 @@ function updateChannels(dt){
 }
 
 
+let handsFreshThisFrame = false;
 function readHands(res){
   hands = [];
+  handsFreshThisFrame = true;
   const L = (res && res.landmarks) || [];
   for (const lm of L){
     // trung điểm ngón cái + ngón trỏ (kiểu nhúm/pinch) — nhưng lọc ngón cái riêng trước
@@ -482,14 +529,33 @@ function bindHands(){
 function updateRibbon(dt){
   tSec += dt;
   const pair = bindHands();
+  const isNew = handsFreshThisFrame; handsFreshThisFrame = false;
+
   if (pair) {
     const [p,q] = pair;
-    if (!A && p) { A = {...p.grip}; rollA = p.roll; }
-    if (!B && q) { B = {...q.grip}; rollB = q.roll; }
-    if (p && A) { A.x = fA.x(p.grip.x, tSec); A.y = fA.y(p.grip.y, tSec);
-                  rollA = lerpA(rollA, p.roll, Math.min(1, dt*8)); seenA = tSec; }
-    if (q && B) { B.x = fB.x(q.grip.x, tSec); B.y = fB.y(q.grip.y, tSec);
-                  rollB = lerpA(rollB, q.roll, Math.min(1, dt*8)); seenB = tSec; }
+    if (!A && p) { A = {...p.grip}; rollA = p.roll; rawA = {...p.grip}; }
+    if (!B && q) { B = {...q.grip}; rollB = q.roll; rawB = {...q.grip}; }
+    // model tay chạy CHẬM hơn 60fps render (~14-20ms/lần) -> chỉ khi có detect MỚI mới
+    // đo vận tốc thật; giữa các lần đó thì NGOẠI SUY theo vận tốc đó thay vì đứng yên rồi
+    // nhảy — đây là nguồn gốc chính của cảm giác "chưa mượt/giật".
+    if (isNew) {
+      const dtReal = Math.max(1/60, tSec - lastDetectT);
+      if (p && rawA) { velA = { x:(p.grip.x-rawA.x)/dtReal, y:(p.grip.y-rawA.y)/dtReal }; rawA = {...p.grip}; }
+      if (q && rawB) { velB = { x:(q.grip.x-rawB.x)/dtReal, y:(q.grip.y-rawB.y)/dtReal }; rawB = {...q.grip}; }
+      lastDetectT = tSec;
+    }
+    if (p && A) { rollA = lerpA(rollA, p.roll, Math.min(1, dt*8)); seenA = tSec; }
+    if (q && B) { rollB = lerpA(rollB, q.roll, Math.min(1, dt*8)); seenB = tSec; }
+  }
+  // ngoại suy vị trí RAW theo vận tốc MỖI khung (kể cả khung không có detect mới), rồi mới
+  // đưa qua OneEuro để mượt nhiễu nhỏ -> chuyển động liên tục thay vì bậc thang.
+  if (A && rawA) {
+    if (!isNew) { rawA.x += velA.x*dt; rawA.y += velA.y*dt; velA.x *= 0.90; velA.y *= 0.90; }
+    A.x = fA.x(rawA.x, tSec); A.y = fA.y(rawA.y, tSec);
+  }
+  if (B && rawB) {
+    if (!isNew) { rawB.x += velB.x*dt; rawB.y += velB.y*dt; velB.x *= 0.90; velB.y *= 0.90; }
+    B.x = fB.x(rawB.x, tSec); B.y = fB.y(rawB.y, tSec);
   }
   const fresh = A && B && (tSec-seenA) < GRACE && (tSec-seenB) < GRACE;
   let gate = 0;
@@ -503,6 +569,7 @@ function updateRibbon(dt){
   if (!fresh && hadHands && alive < 0.05) {
     worldIdx = (worldIdx+1) % WORLDS.length; applyWorld();
     hadHands = false; A = B = null; ambient = [];
+    rawA = rawB = null; velA = {x:0,y:0}; velB = {x:0,y:0};
     fA = { x:OneEuro(2.2,0.9,1.0), y:OneEuro(2.2,0.9,1.0) }; fB = { x:OneEuro(2.2,0.9,1.0), y:OneEuro(2.2,0.9,1.0) };
   }
   for (const s of sparks){ s.life -= dt*1.8; s.x += s.vx*dt*60; s.y += s.vy*dt*60; }
@@ -608,16 +675,43 @@ function drawRibbon(){
 // ma trận: uv màn hình -> uv ảnh mặt nạ, dựng từ tư thế đầu THẬT
 function drawQuad(){ gl.drawArrays(gl.TRIANGLES, 0, 3); }
 
+// Pass BEAUTY: video thật -> fboBeauty (mịn da nhẹ, KHÔNG mirror — bộ lọc ảnh thuần,
+// giữ nguyên hệ toạ độ để thay thế texCam ở bất kỳ đâu mà không phá logic mirror sẵn có).
+function renderBeauty(){
+  ensurePipeline(VW, VH);
+  gl.bindVertexArray(vao);
+  pushTex(0, texCam, video);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fboBeauty.fb);
+  gl.viewport(0,0,VW,VH);
+  gl.useProgram(progBeauty);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, texCam);
+  gl.uniform2f(uBeauty.uPixel, 1/VW, 1/VH);
+  drawQuad();
+}
+
+// Dải đóng: không cần chạy cả pipeline 6-pass nặng, chỉ hiện camera đã beauty (tự mirror
+// giống FS_FRESH để glc luôn nhất quán, Canvas2D không cần mirror riêng nữa).
+function renderBeautyOnly(){
+  renderBeauty();   // phải tự chạy beauty mỗi khung — renderWorld() không được gọi lúc dải đóng
+  if (glc.width !== VW || glc.height !== VH) { glc.width = VW; glc.height = VH; }
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0,0,VW,VH);
+  gl.useProgram(progBlit); gl.bindVertexArray(vao);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, fboBeauty.tex);
+  drawQuad();
+}
+
 function renderWorld(){
   if (!VW) return;
   ensurePipeline(VW, VH);
+  renderBeauty();
   gl.bindVertexArray(vao);
 
-  // Pass 1 FRESH: người + nền của khung này (chưa vệt)
+  // Pass 1 FRESH: người + nền của khung này (chưa vệt) — uCam giờ là fboBeauty (đã mịn da)
   gl.bindFramebuffer(gl.FRAMEBUFFER, fboFresh.fb);
   gl.viewport(0,0,VW,VH);
   gl.useProgram(progFresh);
-  pushTex(0, texCam, video);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, fboBeauty.tex);
   gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, maskTex || blank1);
   gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, texBg);
   const va = VW/VH, Z = 0.72;   // zoom nền để không lộ viền khung tranh
@@ -728,17 +822,17 @@ function frame(now){
   } catch(e){ /* một khung lỗi thì bỏ qua, không giết vòng chạy */ }
 
   updateRibbon(dt);
-  if (alive > 0.02) renderWorld();
+  // dải mở: chạy đủ pipeline 6-pass; dải đóng: chỉ beauty+blit, rẻ hơn nhiều — cả 2 nhánh
+  // đều ghi ra glc đã "mirror đúng" sẵn trong shader, Canvas2D dưới đây không cần tự mirror nữa
+  if (alive > 0.02) renderWorld(); else renderBeautyOnly();
 
   ctx.setTransform(1,0,0,1,0,0);
   ctx.clearRect(0,0,W,H);
   const s = Math.max(W/VW, H/VH), dw = VW*s, dh = VH*s;
-  ctx.save(); ctx.translate(W,0); ctx.scale(-1,1);
-  ctx.drawImage(video, (W-dw)/2, (H-dh)/2, dw, dh);
-  ctx.restore();
+  ctx.drawImage(glc, (W-dw)/2, (H-dh)/2, dw, dh);
 
   drawRibbon();
-  drawDebugDots();
+  // drawDebugDots();  // đã gỡ theo yêu cầu Leon — bật lại khi cần soi tracking
 
   const w = WORLDS[worldIdx];
   ctx.globalCompositeOperation='lighter';
@@ -756,7 +850,8 @@ function frame(now){
     await initModels();
     say('đang xin quyền camera…');
     const stream = await navigator.mediaDevices.getUserMedia({
-      video: { width:{ideal:960}, height:{ideal:720}, facingMode:'user' }, audio:false });
+      video: { width:{ideal:1920}, height:{ideal:1080}, aspectRatio:{ideal:16/9},
+               facingMode:'user' }, audio:false });
     video.srcObject = stream;
     await video.play();
     VW = video.videoWidth; VH = video.videoHeight;
