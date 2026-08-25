@@ -368,8 +368,8 @@ function applyWorld(){
 }
 
 // ===================== Mô hình =====================
-let hand = null, seg = null, ready = false;
-let hands = [], maskTex = null;
+let hand = null, seg = null, face = null, ready = false;
+let hands = [], maskTex = null, faceLm = null;
 
 // 17MB model mà máy chủ chỉ cho cache 1 giờ -> tự giữ lại, lần sau mở là có ngay
 async function modelBuf(url){
@@ -392,10 +392,15 @@ async function initModels(){
   hand = await Vision.HandLandmarker.createFromOptions(fs, { canvas: glc, runningMode:'VIDEO', numHands:2,
     minHandDetectionConfidence:0.25, minHandPresenceConfidence:0.25, minTrackingConfidence:0.25,
     baseOptions:{ delegate:'GPU', modelAssetBuffer: await modelBuf(M+'hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task') }});
-  // FaceLandmarker đã bỏ cùng mặt nạ — mở lại khi có hướng mới cần khoá mặt (xem git history commit b8b785d)
   seg = await Vision.ImageSegmenter.createFromOptions(fs, { canvas: glc, runningMode:'VIDEO',
     outputConfidenceMasks:true, outputCategoryMask:false,
     baseOptions:{ delegate:'GPU', modelAssetBuffer: await modelBuf(M+'image_segmenter/selfie_segmenter/float16/1/selfie_segmenter.tflite') }});
+  // FaceLandmarker mở lại (đã bỏ hồi v3 vì costume dán rời bị lệch) — lần này CHỈ dùng
+  // 478 điểm landmark thô để vẽ mặt nạ, không dùng matrix tư thế đầu 3D + không dán ảnh/hoạ
+  // tiết rời -> mặt nạ luôn khớp vì được dựng lại từ chính điểm đang track mỗi khung.
+  face = await Vision.FaceLandmarker.createFromOptions(fs, { canvas: glc, runningMode:'VIDEO', numFaces:1,
+    outputFaceBlendshapes:false, outputFacialTransformationMatrixes:false,
+    baseOptions:{ delegate:'GPU', modelAssetBuffer: await modelBuf(M+'face_landmarker/face_landmarker/float16/1/face_landmarker.task') }});
   ready = true;
 }
 
@@ -440,6 +445,37 @@ const TWO_HAND_STREAK_MIN = 4;
 // mới cho phép gate mở dần theo khoảng cách. 1 tay đưa lên + 1 tay để yên chỗ khác thì 2 điểm
 // đó không bao giờ gần nhau -> pairEverClose không bao giờ true -> dải không mở được dù giữ bao lâu.
 let pairEverClose = false;
+// "Chắp tay" (2 lòng bàn tay úp sát vào nhau, kiểu 🙏) -> nhấn chìm TOÀN MÀN HÌNH vào thế
+// giới khác thay vì chỉ trong dải; gỡ tay ra thì tan dần về lại đúng cảnh cũ (chỉ trong dải).
+// CHƯA có khung ref thật cho tư thế này (khác các gesture khác trong file — tất cả đều đo
+// trên video ref thật, cái này thì không) -> có thể cần Leon test thật rồi chỉnh ngưỡng.
+// Tín hiệu: (1) 2 tay rất gần nhau (< 5% bề rộng màn hình, chặt hơn cả pairEverClose) VÀ
+// (2) cả 2 tay đều "nghiêng cạnh" (roll gần 90°/π/2 -- lòng bàn tay quay vào nhau chứ không
+// quay ra camera, giống hệt hình dáng edge-on của bàn tay khi chắp lại thật). roll vốn là
+// tín hiệu noisy (xem ghi chú cũ "palmW/handLen... dao động") nên dùng bản ĐÃ LỌC rollA/rollB
+// (mượt qua lerp trong updateRibbon), không dùng raw p.roll. Dự phòng: nếu 2 tay ép sát quá
+// khiến model chỉ còn thấy 1 "tay" (gộp hình), coi tay đó ở gần trung điểm A-B là cùng tín hiệu.
+let immersion = 0;
+let wasFullyOpen = false;   // latch: dải đã từng mở ĐỦ RỘNG (alive>0.8) từ lần bind này. Gate
+// chắp tay theo cái NÀY chứ không theo alive tức thời -- đo được qua mô phỏng: khi 2 tay
+// xích lại gần để chắp tay, chính alive TỰ RƠI (cùng công thức khoảng cách mở dải) và tụt
+// xuống dưới ngưỡng trước khi d+roll kịp cùng đạt điều kiện chắp tay -> immersion không bao
+// giờ kích hoạt được (deadlock: alive rơi chặn chapTarget, chapTarget=0 thì immersion không
+// tăng để giữ sàn cho alive). Latch một chiều né được vòng lặp này.
+function detectPalmsTogether(){
+  if (hands.length >= 2) {
+    const [p,q] = [...hands].sort((x,y)=>x.grip.x-y.grip.x);
+    const d = Math.hypot(q.grip.x-p.grip.x, q.grip.y-p.grip.y) / Math.max(1,W);
+    const edgeA = 1 - Math.abs(Math.cos(rollA)), edgeB = 1 - Math.abs(Math.cos(rollB));
+    return (d < 0.05 && edgeA > 0.55 && edgeB > 0.55) ? 1 : 0;
+  }
+  if (hands.length === 1 && A && B) {
+    const mx=(A.x+B.x)/2, my=(A.y+B.y)/2;
+    const dm = Math.hypot(hands[0].grip.x-mx, hands[0].grip.y-my) / Math.max(1,W);
+    return dm < 0.06 ? 1 : 0;
+  }
+  return 0;
+}
 let fA = { x:OneEuro(2.2,0.9,1.0), y:OneEuro(2.2,0.9,1.0) }, fB = { x:OneEuro(2.2,0.9,1.0), y:OneEuro(2.2,0.9,1.0) };
 const lerpA = (a,b,t) => a + (b-a)*t;
 
@@ -478,6 +514,19 @@ function updateChannels(dt){
   }
 }
 
+
+// ---- Mặt nạ vẽ từ 478 điểm landmark THẬT (không dán ảnh/hoạ tiết rời — xem ghi chú ở
+// initModels) -- cùng công thức mirror (1-x)*W, y*H như tay, để khớp hệ toạ độ với mọi thứ
+// khác trên màn hình (dải, camera). facePx(i) trả về null nếu chưa có mặt.
+function readFace(res){
+  const L = res && res.faceLandmarks && res.faceLandmarks[0];
+  faceLm = L || null;
+}
+function facePx(i){
+  if (!faceLm || !faceLm[i]) return null;
+  const lm = faceLm[i];
+  return { x:(1-lm.x)*W, y:lm.y*H };
+}
 
 let handsFreshThisFrame = false;
 function readHands(res){
@@ -591,14 +640,27 @@ function updateRibbon(dt){
     if (d < 0.08) pairEverClose = true;   // xác nhận đã từng "chụm sát" -- xem giải thích ở khai báo
     if (pairEverClose) {
       const u = Math.max(0, Math.min(1, (d-0.10)/0.12));
-      gate = u*u*(3-2*u); hadHands = true;
+      // chắp tay đưa 2 tay lại GẦN NHAU để kích hoạt immersion -- nếu chỉ dùng công thức
+      // khoảng cách thô ở đây, dải sẽ tự co lại đúng lúc tay đang chụm cho chắp tay (2 hiệu
+      // ứng đấu nhau). Sàn theo `immersion` (đo TRƯỚC lượt cập nhật immersion bên dưới, tức
+      // 1 khung trễ -- không sao, cả 2 kênh cùng chạy ở framerate cao) giữ dải không co lại
+      // trong lúc đang/đã chắp tay.
+      gate = Math.max(u*u*(3-2*u), immersion); hadHands = true;
     }
   }
   if (!(alive >= 0)) alive = 0;
   alive += (gate-alive) * Math.min(1, dt*(gate>alive?14:8));
+  if (alive > 0.8) wasFullyOpen = true;
+  // chắp tay chỉ có nghĩa khi dải ĐÃ TỪNG mở đủ rộng (đúng ý Leon: "lúc đầu chỉ nằm trong
+  // zone... chắp lại thì nguyên màn hình") -- dùng LATCH wasFullyOpen, không dùng alive tức
+  // thời (xem giải thích ở khai báo wasFullyOpen: alive tự rơi đúng lúc tay xích lại gần để
+  // chắp, gate theo alive tức thời sẽ tự khoá chặn trước khi kịp phát hiện).
+  const chapTarget = wasFullyOpen ? detectPalmsTogether() : 0;
+  if (!(immersion >= 0)) immersion = 0;
+  immersion += (chapTarget-immersion) * Math.min(1, dt*(chapTarget>immersion?6:3));
   if (!fresh && hadHands && alive < 0.05) {
     worldIdx = (worldIdx+1) % WORLDS.length; applyWorld();
-    hadHands = false; A = B = null; ambient = []; pairEverClose = false;
+    hadHands = false; A = B = null; ambient = []; pairEverClose = false; immersion = 0; wasFullyOpen = false;
     rawA = rawB = null; velA = {x:0,y:0}; velB = {x:0,y:0};
     fA = { x:OneEuro(2.2,0.9,1.0), y:OneEuro(2.2,0.9,1.0) }; fB = { x:OneEuro(2.2,0.9,1.0), y:OneEuro(2.2,0.9,1.0) };
   }
@@ -628,6 +690,71 @@ function radial(hex){
   g.addColorStop(0,`rgba(${hex},1)`); g.addColorStop(0.4,`rgba(${hex},0.45)`); g.addColorStop(1,`rgba(${hex},0)`);
   cc.fillStyle=g; cc.fillRect(0,0,128,128);
   return radCache[hex]=c;
+}
+
+// ---- Mặt nạ năng lượng: vẽ lại mỗi khung từ chính 478 điểm landmark mặt ĐANG track, không
+// dán ảnh/hoạ tiết rời nào -- nên không có khái niệm "lệch theo cử động" như bản Spider-Man
+// cũ Leon từng chê ("xấu vcc, vì mày vẽ nó không khớp"). Chỉ số landmark (chuẩn công khai
+// MediaPipe FaceMesh, dùng rộng rãi): 10=đỉnh trán, 152=cằm, 234/454=má trái/phải,
+// 33/133=khoé mắt phải (ngoài/trong), 362/263=khoé mắt trái (trong/ngoài), 168=sống mũi
+// giữa 2 mắt, 1=đầu mũi. CHƯA verify trên mặt thật (sandbox không có camera) -- nếu lệch
+// nhẹ do sai chỉ số thì hình chỉ xê dịch vài px (các điểm lân cận trong mesh rất sát nhau),
+// không vỡ hẳn; Leon test thật thấy tỉ lệ nào chưa ưng thì báo, sửa nhanh vì chỉ số + tỉ lệ
+// đều gom hết trong hàm này.
+function drawFaceMask(alphaMul){
+  if (!faceLm || alphaMul <= 0.01) return;
+  const w = WORLDS[worldIdx];
+  let fwd = facePx(10), chin = facePx(152), cheekL = facePx(234), cheekR = facePx(454);
+  const eyeROut = facePx(33), eyeRIn = facePx(133), eyeLIn = facePx(362), eyeLOut = facePx(263);
+  const bridge = facePx(168), noseTip = facePx(1);
+  if (!fwd || !chin || !cheekL || !cheekR || !eyeROut || !eyeRIn || !eyeLIn || !eyeLOut || !bridge || !noseTip) return;
+
+  const faceW = Math.hypot(cheekR.x-cheekL.x, cheekR.y-cheekL.y);
+  const faceH = Math.hypot(chin.x-fwd.x, chin.y-fwd.y);
+  const glowCol = `rgba(${w.edge},1)`;
+  // đo trên ảnh mặt thật (s00.png): dùng thẳng 234/454/10/152 làm 4 đỉnh khối viền thì lệch
+  // ra ngoài tai/tóc — má người thật không lồi ra tới mép ngoài má (landmark 234/454) theo
+  // hướng nhìn thẳng camera, kéo vào 18% so với tâm mặt (trung điểm sống mũi) cho khít hơn.
+  const cx0 = bridge.x, cy0 = bridge.y;
+  const pull = (p, k) => ({ x: p.x + (cx0-p.x)*k, y: p.y + (cy0-p.y)*k });
+  cheekL = pull(cheekL, 0.38); cheekR = pull(cheekR, 0.38);
+  fwd = pull(fwd, 0.16); chin = pull(chin, 0.14);
+
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+
+  // dải "visor" ngang qua 2 mắt, cong nhẹ qua sống mũi
+  ctx.beginPath();
+  ctx.moveTo(eyeROut.x, eyeROut.y);
+  ctx.quadraticCurveTo(bridge.x, bridge.y - faceH*0.02, eyeLOut.x, eyeLOut.y);
+  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  ctx.lineWidth = faceW*0.09; ctx.strokeStyle = glowCol; ctx.globalAlpha = alphaMul*0.16; ctx.stroke();
+  ctx.lineWidth = faceW*0.035; ctx.globalAlpha = alphaMul*0.5; ctx.stroke();
+  ctx.lineWidth = faceW*0.012; ctx.globalAlpha = alphaMul*0.9; ctx.strokeStyle = 'rgba(255,252,255,1)'; ctx.stroke();
+
+  // 2 khe mắt phát sáng, dọc theo trục khoé-trong -> khoé-ngoài mỗi bên
+  for (const [outer, inner] of [[eyeROut,eyeRIn],[eyeLIn,eyeLOut]]){
+    const cx=(outer.x+inner.x)/2, cy=(outer.y+inner.y)/2;
+    const ang = Math.atan2(inner.y-outer.y, inner.x-outer.x);
+    const len = Math.hypot(inner.x-outer.x, inner.y-outer.y)*1.15;
+    ctx.save(); ctx.translate(cx,cy); ctx.rotate(ang);
+    ctx.beginPath(); ctx.ellipse(0,0, len/2, faceW*0.045, 0, 0, 6.283);
+    ctx.fillStyle = glowCol; ctx.globalAlpha = alphaMul*0.85; ctx.fill();
+    ctx.restore();
+  }
+
+  // đường chỉ trung tâm trán -> sống mũi -> đầu mũi, kiểu đường giáp mặt nạ
+  ctx.beginPath(); ctx.moveTo(fwd.x, fwd.y + faceH*0.06); ctx.lineTo(bridge.x, bridge.y); ctx.lineTo(noseTip.x, noseTip.y);
+  ctx.lineWidth = faceW*0.02; ctx.strokeStyle = 'rgba(255,252,255,1)'; ctx.globalAlpha = alphaMul*0.7; ctx.stroke();
+
+  // viền góc cạnh 2 bên má/hàm -- cho mặt nạ có khối, không chỉ mắt+mũi trơ trọi
+  for (const [from,to] of [[fwd,cheekL],[cheekL,chin],[fwd,cheekR],[cheekR,chin]]){
+    ctx.beginPath(); ctx.moveTo(from.x,from.y); ctx.lineTo(to.x,to.y);
+    ctx.lineWidth = faceW*0.045; ctx.strokeStyle = glowCol; ctx.globalAlpha = alphaMul*0.14; ctx.stroke();
+    ctx.lineWidth = faceW*0.01; ctx.globalAlpha = alphaMul*0.45; ctx.stroke();
+  }
+
+  ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over'; ctx.restore();
 }
 
 const SLICES = 48;
@@ -672,6 +799,9 @@ function drawRibbon(){
     ctx.drawImage(radial(w.spark), p.x-r, p.y-r, r*2, r*2);
   }
   ctx.globalCompositeOperation = 'source-over';
+  // mặt nạ vẽ trong vùng clip của dải -- nhân thêm (1-immersion) vì lúc chắp tay/immersion
+  // cao, bản mặt nạ full-screen ở frame() đã phủ chỗ này rồi, tránh cộng dồn 2 lớp chồng nhau
+  drawFaceMask(alive * (1-immersion));
   ctx.restore();
   let i0=0;
   while (i0 < SLICES){
@@ -851,13 +981,16 @@ function frame(now){
   // được dùng lại cùng một số cho hai task khác nhau trong cùng khung.
   if (fresh) try {
     readHands(hand.detectForVideo(handInput(), ++tsCounter));
-    // tách người chỉ chạy khi dải đang mở/sắp mở — model rẻ (<1ms) nên chạy mỗi khung
+    // tách người + mặt chỉ chạy khi dải đang mở/sắp mở — mặt nạ chỉ hiện được lúc đó nên
+    // detect sớm hơn cũng vô ích. Face ~7,5ms/lần (đo hồi kiến trúc v2) — ăn phần lớn dư
+    // địa khung hình còn lại, nhưng cả 3 model cộng dồn vẫn dưới ngân sách 33,3ms @30fps.
     if (alive > 0.02 || hands.length >= 2) {
       seg.segmentForVideo(src, ++tsCounter, r => {
         const mk = r.confidenceMasks && r.confidenceMasks[0];
         if (mk) maskTex = mk.getAsWebGLTexture();
       });
     }
+    if (alive > 0.02) readFace(face.detectForVideo(src, ++tsCounter)); else faceLm = null;
   } catch(e){ /* một khung lỗi thì bỏ qua, không giết vòng chạy */ }
 
   updateRibbon(dt);
@@ -871,6 +1004,16 @@ function frame(now){
   ctx.clearRect(0,0,W,H);
   const s = Math.max(W/VW, H/VH), dw = VW*s, dh = VH*s;
   ctx.drawImage(glbg, (W-dw)/2, (H-dh)/2, dw, dh);
+  // "Chắp tay" (👐 úp lòng bàn tay vào nhau) -> nhấn chìm TOÀN MÀN HÌNH: hoà dần glc (đang
+  // là thế giới khác, vì immersion chỉ >0 khi alive đã >0.3 -- xem updateRibbon) đè lên nền
+  // camera thường theo đúng tỉ lệ immersion. Gỡ tay ra thì immersion tự rơi về 0, tan dần
+  // về lại camera thường + chỉ còn dải làm cửa sổ như cũ, không cần code riêng cho "gỡ ra".
+  if (immersion > 0.01) {
+    ctx.globalAlpha = immersion;
+    ctx.drawImage(glc, (W-dw)/2, (H-dh)/2, dw, dh);
+    ctx.globalAlpha = 1;
+    drawFaceMask(immersion);
+  }
 
   drawRibbon();
   // drawDebugDots();  // đã gỡ theo yêu cầu Leon — bật lại khi cần soi tracking
