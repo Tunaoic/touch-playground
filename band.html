@@ -417,6 +417,17 @@ let A=null, B=null, rollA=0, rollB=0, seenA=0, seenB=0;
 let rawA=null, rawB=null, velA={x:0,y:0}, velB={x:0,y:0}, lastDetectT=0;   // ngoại suy chuyển động giữa các lần model tay chạy
 let ambient=[];   // hạt năng lượng trôi lơ lửng trong dải khi mở, cho nền/viền "sống"
 let alive=0, hadHands=false, sparks=[], tSec=0;
+// hạ ngưỡng conf tay (0.5->0.25, xem "Bug bắt tay" trong git log) từng đổi để bắt đủ 2 tay
+// thật, nhưng cái giá phải trả là model đôi khi tách MỘT tay thật (đặc biệt tư thế xoè vài
+// ngón) thành 2 "tay" giả có vị trí đủ xa nhau để qua được ngưỡng mở dải -> dải mở toang dù
+// chỉ giơ 1 tay (Leon báo). Model thật KHÔNG có field "độ chắc chắn" lộ ra để lọc trực tiếp,
+// nên lọc bằng THỜI GIAN: 1 tay thật khi đưa lên sẽ giữ ổn định hands.length>=2 liên tục
+// nhiều khung; hàng giả thường chỉ loé 1-2 khung rồi mất. Đo trên video ref thật: khi 2 tay
+// thật xoè ra, chuỗi hands.length>=2 kéo dài liên tục 20-44 khung mỗi lần -> ngưỡng 4 khung
+// gần như không thêm độ trễ cảm nhận được cho trường hợp thật, nhưng chặn được phát hiện đôi
+// loé 1 khung.
+let twoHandStreak = 0;
+const TWO_HAND_STREAK_MIN = 4;
 let fA = { x:OneEuro(2.2,0.9,1.0), y:OneEuro(2.2,0.9,1.0) }, fB = { x:OneEuro(2.2,0.9,1.0), y:OneEuro(2.2,0.9,1.0) };
 const lerpA = (a,b,t) => a + (b-a)*t;
 
@@ -483,6 +494,7 @@ function readHands(res){
     hands.push({ grip:{ x:(1-tip.x)*W, y:tip.y*H }, thumbPx, indexPx, pinchNorm,
                  roll: Math.acos(Math.max(-1, Math.min(1, c*sign))) });
   }
+  twoHandStreak = hands.length >= 2 ? twoHandStreak + 1 : 0;
 }
 
 // ---- chấm debug: hiện ĐÚNG chỗ MediaPipe đang thấy ngón cái/ngón trỏ, để soi bằng mắt
@@ -512,7 +524,10 @@ function drawDebugDots(){
 
 function bindHands(){
   if (!hands.length) return null;
-  if (hands.length >= 2) {
+  // chỉ tin "2 tay" khi ổn định liên tục (xem giải thích ở khai báo twoHandStreak) — phát
+  // hiện đôi loé 1-2 khung thì rơi xuống nhánh 1-tay, mà nhánh đó cần A/B đã tồn tại từ
+  // trước mới làm gì được -> 1 tay giơ đơn độc từ trạng thái đóng không thể mở dải nữa.
+  if (hands.length >= 2 && twoHandStreak >= TWO_HAND_STREAK_MIN) {
     const [p,q] = [...hands].sort((x,y)=>x.grip.x-y.grip.x);
     if (A && B) {
       const straight = Math.hypot(p.grip.x-A.x,p.grip.y-A.y)+Math.hypot(q.grip.x-B.x,q.grip.y-B.y);
