@@ -410,7 +410,9 @@ function readHands(res){
   hands = [];
   const L = (res && res.landmarks) || [];
   for (const lm of L){
-    const tip = lm[8];
+    // Leon test tay thật: bắt đúng 2 ngón (cái + trỏ) chứ không phải 1 ngón trỏ trơ trọi —
+    // dùng TRUNG ĐIỂM 2 đầu ngón (kiểu nhúm/pinch tự nhiên), đỡ jitter hơn 1 điểm đơn.
+    const tip = { x:(lm[4].x+lm[8].x)/2, y:(lm[4].y+lm[8].y)/2 };
     const hl = Math.hypot(lm[0].x-lm[9].x, lm[0].y-lm[9].y) || 1e-6;
     const pw = Math.hypot(lm[5].x-lm[17].x, lm[5].y-lm[17].y);
     const c = Math.max(0, Math.min(1, (pw/hl)/0.95));
