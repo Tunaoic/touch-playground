@@ -1075,8 +1075,14 @@ function renderBeauty(){
 function renderBaseLayer(fresh){
   if (!VW) return;
   if (glc.width !== VW || glc.height !== VH) { glc.width = VW; glc.height = VH; }
-  if (!fresh) return;
-  renderBeauty();
+  // BUG THẬT Leon báo "màn hình chớp chớp chớp" lúc đang dùng dải -- CHỈ phần ĐẮT (upload
+  // texture camera mới + chạy shader BEAUTY) mới được gate theo `fresh`. BLIT (rẻ, 1 quad
+  // textured) PHẢI chạy MỌI khung kể cả khung không-fresh: renderWorld() (chạy mỗi khung khi
+  // dải mở, KHÔNG gate theo fresh) ghi đè glc bằng thế giới khác ở CUỐI mỗi khung TRƯỚC ĐÓ --
+  // nếu BLIT cũng bị gate theo fresh, khung không-fresh kế tiếp vẽ NỀN từ glc đang là "thế
+  // giới khác" còn sót lại (chưa được blit-lại-thành-camera-thường), xen kẽ đúng-sai mỗi khung
+  // theo nhịp fresh/không-fresh tự nhiên (camera ~30fps, màn hình rAF ~60Hz) -> nhấp nháy.
+  if (fresh) renderBeauty();
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   gl.viewport(0,0,VW,VH);
   gl.useProgram(progBlit); gl.bindVertexArray(vao);
