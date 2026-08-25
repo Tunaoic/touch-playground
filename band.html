@@ -48,10 +48,12 @@ addEventListener('resize', resize); resize();
 // Bỏ hẳn "mặc đồ nhân vật" — mask/costume dán rời luôn lệch theo cử động thật (Leon chê).
 // Tạm thời: chỉ đổi NỀN + viền sáng bám mép người (lấy trực tiếp từ mask nên không
 // bao giờ lệch, vì không phải tài sản dán rời). Đang chờ Leon chốt hướng khác.
+// violet/gold trước dùng CHUNG 1 ảnh bg_void.jpg (chỉ khác tint) -- Leon chê "concept không rõ
+// là gì", giờ mỗi world 1 ảnh riêng, cùng art-style comic với ember cho đồng bộ.
 const WORLDS = [
-  { id:'ember',  bg:'assets/bg_city.jpg', tint:[1.00,0.55,0.30], edge:'255,190,130', spark:'255,205,150' },
-  { id:'violet', bg:'assets/bg_void.jpg', tint:[0.62,0.35,0.98], edge:'210,165,255', spark:'215,175,255' },
-  { id:'gold',   bg:'assets/bg_void.jpg', tint:[1.00,0.75,0.25], edge:'255,220,160', spark:'255,225,170' },
+  { id:'ember',  bg:'assets/bg_city.jpg',         tint:[1.00,0.55,0.30], edge:'255,190,130', spark:'255,205,150' },
+  { id:'violet', bg:'assets/bg_violet_temple.jpg', tint:[0.62,0.35,0.98], edge:'210,165,255', spark:'215,175,255' },
+  { id:'gold',   bg:'assets/bg_gold_desert.jpg',   tint:[1.00,0.75,0.25], edge:'255,220,160', spark:'255,225,170' },
 ];
 let worldIdx = 0;
 
@@ -172,6 +174,31 @@ void main(){
   float edge = smoothstep(0.20, 0.55, abs(mL-mR) + abs(mT-mB));
   float flow = 0.5 + 0.5*fbm(warp(uv*6.0, uTime, uTurb) + uTime*0.15);
 
+  // --- "tóc bốc cháy" kiểu Super Saiyan/Naruto (Leon xin thêm) — không có mask tóc riêng
+  // (segmentation chỉ tách được "người" chung), nên xấp xỉ: mạnh dần khi CÀNG GẦN ĐỈNH khung
+  // (đầu luôn ở trên trong khung webcam bình thường) + noise RIÊNG cuộn NGƯỢC LÊN theo thời
+  // gian (lửa/khói thật luôn cuộn lên, khác domain-warp nền vốn không có hướng ưu tiên) +
+  // rung nhanh (lửa thật nhấp nháy nhanh, không "thở" chậm như flow nền) + lõi thiên trắng
+  // pha ngoài rìa màu world-tint (lửa thật: lõi trắng nóng nhất, rìa mới có màu).
+  // Bản đầu chỉ nhân vào edge (viền mỏng bám sát mép) -> nhìn như viền sáng hơi ấm, không
+  // ra dáng "tém lửa" thật. Sửa: dò dọc THEO HƯỚNG XUỐNG (tìm "người" ở dưới, vì tém lửa mọc
+  // LÊN từ đầu) một quãng ngoài silhouette, lệch ngang theo noise cho tém không thẳng cứng —
+  // pixel NGOÀI người (trên đỉnh đầu) vẫn bắt được lửa nếu gần người phía dưới.
+  float headBias = 1.0 - smoothstep(0.02, 0.68, uv.y);      // 1 ở đỉnh khung, tắt dần xuống ngực
+  vec2 flameUv = uv - vec2(0.0, uTime*0.22);                // cuộn LÊN, không cuộn ngang như warp() nền
+  float flameNoise = fbm(warp(flameUv*5.0, uTime*1.6, uTurb*1.4 + 0.4));
+  float flameFlicker = 0.5 + 0.5*sin(uTime*9.0 + flameNoise*8.0);
+  float flameReach = 0.0;
+  for (int fi = 1; fi <= 7; fi++) {
+    float ft = float(fi) / 7.0;
+    float sway = (flameNoise - 0.5) * 0.06 * ft;
+    vec2 samplePos = uv + vec2(sway, ft * 0.10);              // +y = xuống dưới = về phía người thật
+    float m = texture(uMask, samplePos).r;
+    flameReach = max(flameReach, smoothstep(0.3, 0.6, m) * (1.0 - ft));
+  }
+  float flame = max(edge, flameReach) * headBias * flameNoise * (0.5 + 0.5*flameFlicker);
+  vec3 flameCol = mix(uTint, mix(vec3(1.0,0.85,0.4), vec3(1.0), flameFlicker), 0.5 + 0.4*flameNoise);
+
   // --- nền: Ken Burns + xoáy năng lượng bằng domain-warp thật (không sin/cos thô) ---
   float zoom = 1.0 + 0.05*sin(uTime*0.11);
   vec2 pan = vec2(sin(uTime*0.07), cos(uTime*0.05)) * 0.02;
@@ -185,10 +212,12 @@ void main(){
   vec3 person = palette(t, uTint*0.18, mix(uTint, vec3(1.0), 0.55)*0.55, vec3(1.0), uTint*0.22);
   person *= 0.86 + 0.14*sin(uv.y*760.0 - uTime*7.0);           // dòng quét ngang kiểu hologram
   person += uTint * edge * flow * 1.4;                         // viền trong rực theo dòng chảy
+  person += flameCol * flame * 4.0;                            // lửa tóc: lõi thiên trắng, rực hơn hẳn viền thường
   person = mix(cam*0.16 + person*0.84, person, 0.85);          // chừa chút bóng thật cho có khối
 
   vec3 col = mix(bg, person, personA);
   col += uTint * edge * flow * 0.9;                            // hào quang tràn ra ngoài silhouette
+  col += flameCol * flame * 3.2;                               // lửa tóc tràn ra ngoài silhouette, mạnh hơn hào quang thường
 
   o = vec4(col, 1.0);
 }`;
