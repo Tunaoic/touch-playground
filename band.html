@@ -50,10 +50,19 @@ addEventListener('resize', resize); resize();
 // bao giờ lệch, vì không phải tài sản dán rời). Đang chờ Leon chốt hướng khác.
 // violet/gold trước dùng CHUNG 1 ảnh bg_void.jpg (chỉ khác tint) -- Leon chê "concept không rõ
 // là gì", giờ mỗi world 1 ảnh riêng, cùng art-style comic với ember cho đồng bộ.
+// Mỗi world giờ có 2 bản ảnh: bgP (dọc 9:16, cho điện thoại) và bgL (ngang 16:9, cho laptop) —
+// Leon báo ảnh dọc bị camera laptop (ngang) ép "kéo nhoè dàn ngang" vì lệch tỉ lệ quá xa so
+// với khung camera thật (fit trong shader là kiểu "cover" nên KHÔNG méo hình, nhưng lệch tỉ lệ
+// quá xa thì phải zoom-crop rất sâu, nhìn giống bị nhoè/kéo dãn). pickBgPath() chọn bản đúng
+// theo tỉ lệ camera THẬT (VW/VH — chính là "va" dùng trong công thức fit, không phải kích
+// thước cửa sổ trình duyệt, vì đó mới là cái quyết định độ crop-zoom thật sự).
 const WORLDS = [
-  { id:'ember',  bg:'assets/bg_city.jpg',         tint:[1.00,0.55,0.30], edge:'255,190,130', spark:'255,205,150' },
-  { id:'violet', bg:'assets/bg_violet_temple.jpg', tint:[0.62,0.35,0.98], edge:'210,165,255', spark:'215,175,255' },
-  { id:'gold',   bg:'assets/bg_gold_desert.jpg',   tint:[1.00,0.75,0.25], edge:'255,220,160', spark:'255,225,170' },
+  { id:'ember',  bgP:'assets/bg_city.jpg',         bgL:'assets/bg_city_land.jpg',
+    tint:[1.00,0.55,0.30], edge:'255,190,130', spark:'255,205,150' },
+  { id:'violet', bgP:'assets/bg_violet_temple.jpg', bgL:'assets/bg_violet_temple_land.jpg',
+    tint:[0.62,0.35,0.98], edge:'210,165,255', spark:'215,175,255' },
+  { id:'gold',   bgP:'assets/bg_gold_desert.jpg',   bgL:'assets/bg_gold_desert_land.jpg',
+    tint:[1.00,0.75,0.25], edge:'255,220,160', spark:'255,225,170' },
 ];
 let worldIdx = 0;
 
@@ -390,9 +399,15 @@ function ensurePipeline(w, h){
   resetTrail();
 }
 
+// trước khi có camera thật (VW=0, lúc app vừa mở), tạm đoán theo tỉ lệ cửa sổ trình duyệt;
+// applyWorld() được gọi lại NGAY khi biết VW/VH thật (xem chỗ getUserMedia) để sửa lại đúng.
+function pickBgPath(w){
+  const landscape = VW > 0 ? (VW >= VH) : (innerWidth >= innerHeight);
+  return landscape ? w.bgL : w.bgP;
+}
 function applyWorld(){
   const w = WORLDS[worldIdx];
-  loadTex(2, texBg, w.bg, im => { bgAspect = im.naturalWidth/im.naturalHeight; });
+  loadTex(2, texBg, pickBgPath(w), im => { bgAspect = im.naturalWidth/im.naturalHeight; });
   resetTrail();   // đổi thế giới -> xoá vệt cũ, khỏi lem màu theme trước sang theme mới
 }
 
@@ -1153,6 +1168,8 @@ function frame(now){
     video.srcObject = stream;
     await video.play();
     VW = video.videoWidth; VH = video.videoHeight;
+    applyWorld();   // lúc gọi lần đầu ở trên VW=0 nên đoán tạm theo cửa sổ -- giờ biết tỉ lệ
+                     // camera THẬT rồi, load lại đúng bản ảnh dọc/ngang (xem pickBgPath)
     say('');
     requestAnimationFrame(frame);
   } catch(e) {
