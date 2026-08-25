@@ -85,6 +85,7 @@ uniform vec2  uBgFit;
 uniform vec2  uPixel;
 uniform vec3  uTint;
 uniform float uTime;
+uniform float uTurb;      // kênh handSpeed -> độ nhiễu loạn của domain-warp (KHÔNG set thẳng, chỉ nhiễu thêm)
 
 float luma(vec3 c){ return dot(c, vec3(0.299,0.587,0.114)); }
 float hash(vec2 p){ return fract(sin(dot(p, vec2(41.3,289.1)))*43758.5453); }
@@ -99,10 +100,12 @@ float fbm(vec2 p){
   for (int i=0;i<4;i++){ val += amp*noise(p); p *= 2.02; amp *= 0.5; }
   return val;
 }
-// domain warp kiểu Inigo Quilez f(p + h(p)) -> hoạ tiết "thở" thay vì tuần hoàn máy móc
-vec2 warp(vec2 p, float t){
+// domain warp kiểu Inigo Quilez f(p + h(p)) -> hoạ tiết "thở" thay vì tuần hoàn máy móc.
+// turb (0..~2, từ kênh handSpeed) CỘNG THÊM vào biên độ nền — tay càng động, hệ càng
+// turbulence hơn; đứng yên thì về mức thở nhẹ mặc định, không bao giờ phẳng lì.
+vec2 warp(vec2 p, float t, float turb){
   vec2 q = vec2(fbm(p + t*0.05), fbm(p + vec2(5.2,1.3) - t*0.04));
-  return p + 0.35*(q - 0.5);
+  return p + (0.22 + 0.30*turb)*(q - 0.5);
 }
 // bảng màu cosine IQ: không bao giờ xám giữa chừng như mix() tuyến tính
 vec3 palette(float t, vec3 a, vec3 b, vec3 c, vec3 d){ return a + b*cos(6.28318*(c*t+d)); }
@@ -125,7 +128,7 @@ void main(){
   float mL = texture(uMask, uv - vec2(px.x,0.0)).r, mR = texture(uMask, uv + vec2(px.x,0.0)).r;
   float mT = texture(uMask, uv - vec2(0.0,px.y)).r, mB = texture(uMask, uv + vec2(0.0,px.y)).r;
   float edge = smoothstep(0.20, 0.55, abs(mL-mR) + abs(mT-mB));
-  float flow = 0.5 + 0.5*fbm(warp(uv*6.0, uTime) + uTime*0.15);
+  float flow = 0.5 + 0.5*fbm(warp(uv*6.0, uTime, uTurb) + uTime*0.15);
 
   // --- nền: Ken Burns + xoáy năng lượng bằng domain-warp thật (không sin/cos thô) ---
   float zoom = 1.0 + 0.05*sin(uTime*0.11);
@@ -133,7 +136,7 @@ void main(){
   vec2 buv = (uv - 0.5 + pan) * uBgFit * zoom + 0.5;
   vec3 bg = texture(uBg, vec2(buv.x, 1.0 - buv.y)).rgb;
   bg *= 0.55 + 0.45 * smoothstep(1.0, 0.0, length(uv-0.5));
-  bg += uTint * (fbm(warp(uv*3.0, uTime*0.6)) - 0.5) * 0.16;
+  bg += uTint * (fbm(warp(uv*3.0, uTime*0.6, uTurb)) - 0.5) * 0.16;
 
   // --- người: bảng màu cosine IQ theo độ sáng+dòng chảy+thời gian, không mix() thẳng ---
   float t = cL*0.65 + flow*0.25 + uTime*0.015;
@@ -157,12 +160,13 @@ uniform sampler2D uPrev, uFresh;
 uniform float uDecay;
 uniform vec2  uDrift;
 uniform float uZoom;
+uniform float uKick;      // kênh handAccel -> hệ "giật" mạnh hơn khi tay tăng tốc đột ngột
 void main(){
   vec2 uv = (v - 0.5) * uZoom + 0.5 + uDrift;
   vec3 prev  = texture(uPrev, uv).rgb;
   vec3 fresh = texture(uFresh, v).rgb;
   vec3 trail = max(prev*uDecay - 0.02, 0.0);
-  o = vec4(max(trail, fresh), 1.0);
+  o = vec4(max(trail, fresh*(1.0 + uKick*0.9)), 1.0);
 }`;
 
 // --- Pass 3 "BRIGHT": trích vùng sáng cho bloom (Đ5) ---
@@ -218,8 +222,8 @@ const progCombine = compileProgram(FS_COMBINE);
 const progBright  = compileProgram(FS_BRIGHT);
 const progBlur    = compileProgram(FS_BLUR);
 const progPresent = compileProgram(FS_PRESENT);
-const uFresh   = locs(progFresh,   ['uBgFit','uPixel','uTint','uTime']);
-const uCombine = locs(progCombine, ['uDecay','uDrift','uZoom']);
+const uFresh   = locs(progFresh,   ['uBgFit','uPixel','uTint','uTime','uTurb']);
+const uCombine = locs(progCombine, ['uDecay','uDrift','uZoom','uKick']);
 const uBlur    = locs(progBlur,    ['uTexel','uDir']);
 const uPresent = locs(progPresent, ['uTime']);
 // sampler unit cố định, gán 1 lần — không đổi theo khung
@@ -371,6 +375,37 @@ let alive=0, hadHands=false, sparks=[], tSec=0;
 let fA = { x:OneEuro(), y:OneEuro() }, fB = { x:OneEuro(), y:OneEuro() };
 const lerpA = (a,b,t) => a + (b-a)*t;
 
+// ===================== Kênh (channel, kiểu CHOP của TouchDesigner) =====================
+// Mọi tín hiệu sống đi qua đây thành "kênh" độc lập có tên, thay vì gắn cứng
+// 1 landmark -> 1 hiệu ứng. Hiệu ứng mới chỉ cần ĐỌC kênh có sẵn; đổi nguồn (sau này
+// nối audio chẳng hạn) chỉ cần đổi chỗ GHI kênh, chỗ đọc không đụng gì.
+const CH = {
+  time: 0,
+  ribbonOpen: 0,     // = alive, 0..1
+  ribbonLen: 0,      // độ dài dải hiện tại (px), 0 khi đóng
+  handSpeed: 0,      // tốc độ tay đã lọc mượt, vô đơn vị (chuẩn hoá theo bề rộng màn hình)
+  handAccel: 0,      // độ giật tăng tốc tức thời — chỉ dương, dùng cho hiệu ứng "kick"
+};
+const chLag = { handSpeed: OneEuro(0.8, 0.9, 1.0) };   // lọc riêng kênh tốc độ, tách khỏi lọc vị trí của fA/fB
+let chPrevMid = null, chPrevSpeed = 0;
+function updateChannels(dt){
+  CH.time = tSec;
+  CH.ribbonOpen = alive;
+  if (A && B) {
+    CH.ribbonLen = Math.hypot(B.x-A.x, B.y-A.y);
+    const mid = { x:(A.x+B.x)/2, y:(A.y+B.y)/2 };
+    const raw = chPrevMid ? Math.hypot(mid.x-chPrevMid.x, mid.y-chPrevMid.y)/Math.max(dt,1e-3)/Math.max(W,1) : 0;
+    chPrevMid = mid;
+    CH.handSpeed = chLag.handSpeed(raw, tSec);
+    CH.handAccel = Math.max(0, CH.handSpeed - chPrevSpeed);   // chỉ bắt lúc TĂNG tốc, giảm tốc không kick
+    chPrevSpeed = CH.handSpeed;
+  } else {
+    chPrevMid = null;
+    CH.ribbonLen = 0; CH.handSpeed = chLag.handSpeed(0, tSec); CH.handAccel = 0;
+  }
+}
+
+
 function readHands(res){
   hands = [];
   const L = (res && res.landmarks) || [];
@@ -440,6 +475,8 @@ function updateRibbon(dt){
   for (const p of ambient){ p.life -= dt*p.decay; p.sway += dt*2;
     p.x += (p.vx + Math.sin(p.sway)*0.3) * dt*60; p.y += p.vy*dt*60; }
   ambient = ambient.filter(p=>p.life>0);
+
+  updateChannels(dt);
 }
 
 const radCache = {};
@@ -539,6 +576,7 @@ function renderWorld(){
   gl.uniform2f(uFresh.uPixel, 1/VW, 1/VH);
   gl.uniform3fv(uFresh.uTint, WORLDS[worldIdx].tint);
   gl.uniform1f(uFresh.uTime, tSec);
+  gl.uniform1f(uFresh.uTurb, Math.min(2, CH.handSpeed * 22));   // kênh handSpeed -> độ nhiễu warp
   drawQuad();
 
   // Pass 2 COMBINE: feedback ping-pong — trail cũ + khung mới -> vệt ghi vào FBO còn lại
@@ -551,6 +589,7 @@ function renderWorld(){
   gl.uniform1f(uCombine.uDecay, 0.90);
   gl.uniform2f(uCombine.uDrift, Math.sin(tSec*0.21)*0.0009, Math.cos(tSec*0.17)*0.0007);
   gl.uniform1f(uCombine.uZoom, 1.004);
+  gl.uniform1f(uCombine.uKick, Math.min(1, CH.handAccel * 45));   // kênh handAccel -> kick vào trail
   drawQuad();
   trailRead = w;
 
