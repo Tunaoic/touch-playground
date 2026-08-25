@@ -372,7 +372,7 @@ const GRACE = 0.55;
 let A=null, B=null, rollA=0, rollB=0, seenA=0, seenB=0;
 let ambient=[];   // hạt năng lượng trôi lơ lửng trong dải khi mở, cho nền/viền "sống"
 let alive=0, hadHands=false, sparks=[], tSec=0;
-let fA = { x:OneEuro(), y:OneEuro() }, fB = { x:OneEuro(), y:OneEuro() };
+let fA = { x:OneEuro(2.2,0.9,1.0), y:OneEuro(2.2,0.9,1.0) }, fB = { x:OneEuro(2.2,0.9,1.0), y:OneEuro(2.2,0.9,1.0) };
 const lerpA = (a,b,t) => a + (b-a)*t;
 
 // ===================== Kênh (channel, kiểu CHOP của TouchDesigner) =====================
@@ -410,16 +410,49 @@ function readHands(res){
   hands = [];
   const L = (res && res.landmarks) || [];
   for (const lm of L){
-    // Leon test tay thật: bắt đúng 2 ngón (cái + trỏ) chứ không phải 1 ngón trỏ trơ trọi —
-    // dùng TRUNG ĐIỂM 2 đầu ngón (kiểu nhúm/pinch tự nhiên), đỡ jitter hơn 1 điểm đơn.
-    const tip = { x:(lm[4].x+lm[8].x)/2, y:(lm[4].y+lm[8].y)/2 };
+    // trung điểm ngón cái + ngón trỏ (kiểu nhúm/pinch) — nhưng lọc ngón cái riêng trước
+    // vì landmark 4 (đầu ngón cái) tự nó nhiễu hơn hẳn landmark 8 trong MediaPipe, dồn
+    // hết vào midpoint không lọc là nguồn gốc cảm giác "mông lung" mà Leon báo.
+    const thumbPx = { x:(1-lm[4].x)*W, y:lm[4].y*H };
+    const indexPx = { x:(1-lm[8].x)*W, y:lm[8].y*H };
+    // Đo trên khung ref thật: khi tay ở tư thế nắm hờ chỉ chỉa ngón trỏ (không cố tình
+    // nhúm sát), ngón cái-trỏ có thể cách nhau tới 120px/1024 — trung điểm 50/50 rơi vào
+    // KHOẢNG TRỐNG giữa 2 ngón, không nằm trên ngón nào cả (thấy rõ qua debug dots) ->
+    // đây là nguồn gốc "mông lung". Nghiêng về ngón trỏ (ổn định, luôn đúng đầu ngón)
+    // nhưng vẫn cộng thêm ngón cái để còn "cảm" được cả 2, không quay lại index trơ trọi.
+    const tip = { x: lm[8].x*0.65 + lm[4].x*0.35, y: lm[8].y*0.65 + lm[4].y*0.35 };
     const hl = Math.hypot(lm[0].x-lm[9].x, lm[0].y-lm[9].y) || 1e-6;
     const pw = Math.hypot(lm[5].x-lm[17].x, lm[5].y-lm[17].y);
     const c = Math.max(0, Math.min(1, (pw/hl)/0.95));
     const sign = ((lm[5].z || 0) - (lm[17].z || 0)) >= 0 ? 1 : -1;
-    hands.push({ grip:{ x:(1-tip.x)*W, y:tip.y*H },
+    hands.push({ grip:{ x:(1-tip.x)*W, y:tip.y*H }, thumbPx, indexPx,
                  roll: Math.acos(Math.max(-1, Math.min(1, c*sign))) });
   }
+}
+
+// ---- chấm debug: hiện ĐÚNG chỗ MediaPipe đang thấy ngón cái/ngón trỏ, để soi bằng mắt
+// thay vì đoán. Xanh dương = ngón cái, hồng = ngón trỏ, vàng nhỏ = điểm nhúm thô (chưa lọc),
+// vàng viền trắng to = điểm neo dải sau khi đã lọc mượt (A/B). Gỡ khi tracking đã ổn.
+function drawDebugDots(){
+  ctx.save();
+  for (const h of hands) {
+    ctx.beginPath(); ctx.arc(h.thumbPx.x, h.thumbPx.y, 7*DPR, 0, 7);
+    ctx.fillStyle = 'rgba(70,150,255,0.9)'; ctx.fill();
+    ctx.beginPath(); ctx.arc(h.indexPx.x, h.indexPx.y, 7*DPR, 0, 7);
+    ctx.fillStyle = 'rgba(255,70,180,0.9)'; ctx.fill();
+    const rawX = (h.thumbPx.x+h.indexPx.x)/2, rawY = (h.thumbPx.y+h.indexPx.y)/2;
+    ctx.beginPath(); ctx.arc(rawX, rawY, 4*DPR, 0, 7);
+    ctx.fillStyle = 'rgba(255,220,40,0.95)'; ctx.fill();
+  }
+  for (const p of [A, B]) {
+    if (!p) continue;
+    ctx.beginPath(); ctx.arc(p.x, p.y, 10*DPR, 0, 7);
+    ctx.fillStyle = 'rgba(255,220,40,0.55)'; ctx.fill();
+    ctx.lineWidth = 2*DPR; ctx.strokeStyle = 'rgba(255,255,255,0.9)'; ctx.stroke();
+  }
+  ctx.font = `${13*DPR}px -apple-system,sans-serif`; ctx.fillStyle = '#fff';
+  ctx.fillText(`tay: ${hands.length}  xanh=cái  hồng=trỏ  vàng nhỏ=nhúm thô  vàng to=neo đã lọc`, 10*DPR, 24*DPR);
+  ctx.restore();
 }
 
 function bindHands(){
@@ -462,7 +495,7 @@ function updateRibbon(dt){
   if (!fresh && hadHands && alive < 0.05) {
     worldIdx = (worldIdx+1) % WORLDS.length; applyWorld();
     hadHands = false; A = B = null; ambient = [];
-    fA = { x:OneEuro(), y:OneEuro() }; fB = { x:OneEuro(), y:OneEuro() };
+    fA = { x:OneEuro(2.2,0.9,1.0), y:OneEuro(2.2,0.9,1.0) }; fB = { x:OneEuro(2.2,0.9,1.0), y:OneEuro(2.2,0.9,1.0) };
   }
   for (const s of sparks){ s.life -= dt*1.8; s.x += s.vx*dt*60; s.y += s.vy*dt*60; }
   sparks = sparks.filter(s=>s.life>0);
@@ -691,6 +724,7 @@ function frame(now){
   ctx.restore();
 
   drawRibbon();
+  drawDebugDots();
 
   const w = WORLDS[worldIdx];
   ctx.globalCompositeOperation='lighter';
