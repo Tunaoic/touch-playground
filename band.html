@@ -428,6 +428,15 @@ let alive=0, hadHands=false, sparks=[], tSec=0;
 // loé 1 khung.
 let twoHandStreak = 0;
 const TWO_HAND_STREAK_MIN = 4;
+// Lớp chặn thứ 2, ĐỘC LẬP với streak — quan trọng hơn: streak chỉ lọc được phát hiện đôi
+// LOÉ LÊN rồi mất; nó KHÔNG chặn được trường hợp 2 "tay" ổn định thật sự nhưng không phải là
+// cử chỉ dải — ví dụ camera vừa mở rộng góc (FOV fix trước) giờ lỡ thấy luôn bàn tay kia đang
+// để yên trên bàn, MediaPipe nhận diện ĐÚNG là 2 tay thật chứ không nhiễu. Thiết kế dải vốn đã
+// định nghĩa cử chỉ là "CHỤM SÁT rồi KÉO RA" (xem ghi chú cũ "chụm sát = chưa có gì") -> bắt
+// buộc 2 tay phải từng ở gần nhau (< 8% bề rộng màn hình) tại một thời điểm SAU khi đã bind,
+// mới cho phép gate mở dần theo khoảng cách. 1 tay đưa lên + 1 tay để yên chỗ khác thì 2 điểm
+// đó không bao giờ gần nhau -> pairEverClose không bao giờ true -> dải không mở được dù giữ bao lâu.
+let pairEverClose = false;
 let fA = { x:OneEuro(2.2,0.9,1.0), y:OneEuro(2.2,0.9,1.0) }, fB = { x:OneEuro(2.2,0.9,1.0), y:OneEuro(2.2,0.9,1.0) };
 const lerpA = (a,b,t) => a + (b-a)*t;
 
@@ -576,14 +585,17 @@ function updateRibbon(dt){
   let gate = 0;
   if (fresh) {
     const d = Math.hypot(B.x-A.x, B.y-A.y) / Math.max(1,W);
-    const u = Math.max(0, Math.min(1, (d-0.10)/0.12));
-    gate = u*u*(3-2*u); hadHands = true;
+    if (d < 0.08) pairEverClose = true;   // xác nhận đã từng "chụm sát" -- xem giải thích ở khai báo
+    if (pairEverClose) {
+      const u = Math.max(0, Math.min(1, (d-0.10)/0.12));
+      gate = u*u*(3-2*u); hadHands = true;
+    }
   }
   if (!(alive >= 0)) alive = 0;
   alive += (gate-alive) * Math.min(1, dt*(gate>alive?14:8));
   if (!fresh && hadHands && alive < 0.05) {
     worldIdx = (worldIdx+1) % WORLDS.length; applyWorld();
-    hadHands = false; A = B = null; ambient = [];
+    hadHands = false; A = B = null; ambient = []; pairEverClose = false;
     rawA = rawB = null; velA = {x:0,y:0}; velB = {x:0,y:0};
     fA = { x:OneEuro(2.2,0.9,1.0), y:OneEuro(2.2,0.9,1.0) }; fB = { x:OneEuro(2.2,0.9,1.0), y:OneEuro(2.2,0.9,1.0) };
   }
