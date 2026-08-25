@@ -508,6 +508,42 @@ function detectPalmsTogether(){
 let fA = { x:OneEuro(2.2,0.9,1.0), y:OneEuro(2.2,0.9,1.0) }, fB = { x:OneEuro(2.2,0.9,1.0), y:OneEuro(2.2,0.9,1.0) };
 const lerpA = (a,b,t) => a + (b-a)*t;
 
+// ===================== Hình thái 3D của dải (Leon: "khô cứng như 2D", đòi khớp theo TỪNG
+// NGÓN + chiều sâu) =====================
+// A/B (grip 65/35) ở TRÊN vẫn giữ nguyên, chỉ dùng để lái state machine mở/đóng/chắp tay —
+// KHÔNG đụng vào, vì đã đo+vá kỹ qua nhiều vòng (mông lung, phát hiện đôi giả, deadlock chắp
+// tay...). Bộ 4 điểm dưới đây là lớp RIÊNG chỉ phục vụ HÌNH DÁNG dải, đọc thêm dữ liệu ngón
+// cái/ngón trỏ THẬT của MediaPipe (readHands() đã tính sẵn thumbPx/indexPx cho mỗi tay, trước
+// giờ chỉ dùng để vẽ debug dots) — không phải bịa thêm điểm ảo.
+//
+// Chiều sâu: MediaPipe trả z cho mỗi landmark, nhưng z đó lấy GỐC LÀ CỔ TAY CỦA CHÍNH BÀN TAY
+// ĐÓ (mỗi tay một hệ quy chiếu riêng) — đo thật trên video ref xác nhận: wristZ luôn ~0 cho cả
+// 2 tay (nhiễu float, không phải tín hiệu), nên KHÔNG so sánh được z giữa tay này với tay kia
+// để biết tay nào gần camera hơn — dùng thẳng z là sai. Thay vào đó dùng ĐỘ LỚN BIỂU KIẾN của
+// bàn tay trên khung hình (hl = khoảng cổ tay-đến-gốc-ngón-giữa, tính ra PIXEL thật chứ không
+// chuẩn hoá) làm tín hiệu chiều sâu: tay gần camera hơn thì TRÔNG TO HƠN trên khung — đúng
+// nguyên lý phối cảnh mắt người dùng thật, và đã có sẵn hl trong readHands(). Đo trên video
+// ref: kích thước tay dao động 16-74px (trung bình 45px), 2 tay cùng khung có thể lệch nhau
+// tới 110% so với trung bình — đủ biên độ để phối cảnh nhìn thấy được, không phải áp đặt.
+function mkPt(){ return { pos:null, raw:null, vel:{x:0,y:0}, fx:OneEuro(2.2,0.9,1.0), fy:OneEuro(2.2,0.9,1.0) }; }
+function trackPoint(pt, target, isNew, dt, dtReal, tSecNow){
+  if (!pt.pos && target) { pt.pos = {...target}; pt.raw = {...target}; }
+  if (!pt.raw) return;
+  if (isNew) {
+    if (target) { pt.vel = { x:(target.x-pt.raw.x)/dtReal, y:(target.y-pt.raw.y)/dtReal }; pt.raw = {...target}; }
+  } else {
+    pt.raw.x += pt.vel.x*dt; pt.raw.y += pt.vel.y*dt; pt.vel.x *= 0.90; pt.vel.y *= 0.90;
+  }
+  pt.pos = { x: pt.fx(pt.raw.x, tSecNow), y: pt.fy(pt.raw.y, tSecNow) };
+}
+function resetPt(pt){ pt.pos=null; pt.raw=null; pt.vel={x:0,y:0}; pt.fx=OneEuro(2.2,0.9,1.0); pt.fy=OneEuro(2.2,0.9,1.0); }
+let AthumbPt = mkPt(), AindexPt = mkPt(), BthumbPt = mkPt(), BindexPt = mkPt();
+let AsizeVal = 45, BsizeVal = 45;   // px biểu kiến, khởi tạo = trung bình đo được
+const AsizeF = OneEuro(1.2, 0.7, 1.0), BsizeF = OneEuro(1.2, 0.7, 1.0);
+// "vải mềm": lệch vuông góc trục dài, dao động sống ngay cả lúc đứng yên (không bao giờ phẳng
+// lì, cùng triết lý với `turb` nền) + biên độ tăng theo tốc độ tay CH.handSpeed thật.
+let membraneSway = 0;
+
 // ===================== Kênh (channel, kiểu CHOP của TouchDesigner) =====================
 // Mọi tín hiệu sống đi qua đây thành "kênh" độc lập có tên, thay vì gắn cứng
 // 1 landmark -> 1 hiệu ứng. Hiệu ứng mới chỉ cần ĐỌC kênh có sẵn; đổi nguồn (sau này
@@ -582,6 +618,7 @@ function readHands(res){
     // camera. Đo trên video ref: dao động 0.14 (nhúm chặt) .. 3.3 (xoè hết cỡ), p10=0.67 p90=2.28.
     const pinchNorm = Math.hypot(lm[4].x-lm[8].x, lm[4].y-lm[8].y) / hl;
     hands.push({ grip:{ x:(1-tip.x)*W, y:tip.y*H }, thumbPx, indexPx, pinchNorm,
+                 sizePx: hl*W,   // độ lớn biểu kiến của tay (px thật) -- tín hiệu chiều sâu, xem ghi chú ở mkPt/trackPoint
                  roll: Math.acos(Math.max(-1, Math.min(1, c*sign))) });
   }
   twoHandStreak = hands.length >= 2 ? twoHandStreak + 1 : 0;
@@ -635,23 +672,36 @@ function updateRibbon(dt){
   tSec += dt;
   const pair = bindHands();
   const isNew = handsFreshThisFrame; handsFreshThisFrame = false;
+  // dtReal cần cho CẢ velocity A/B (gesture) LẪN 4 điểm ngón (hình dáng) -- tính 1 lần dùng
+  // chung, đọc lastDetectT TRƯỚC khi nó được cập nhật bên dưới (giữ đúng nghĩa "thời gian thật
+  // trôi qua kể từ lần detect trước", không phải khoảng cách tới khung hiện tại).
+  const dtReal = Math.max(1/60, tSec - lastDetectT);
+  let p = null, q = null;
 
   if (pair) {
-    const [p,q] = pair;
+    [p, q] = pair;
     if (!A && p) { A = {...p.grip}; rollA = p.roll; rawA = {...p.grip}; }
     if (!B && q) { B = {...q.grip}; rollB = q.roll; rawB = {...q.grip}; }
     // model tay chạy CHẬM hơn 60fps render (~14-20ms/lần) -> chỉ khi có detect MỚI mới
     // đo vận tốc thật; giữa các lần đó thì NGOẠI SUY theo vận tốc đó thay vì đứng yên rồi
     // nhảy — đây là nguồn gốc chính của cảm giác "chưa mượt/giật".
     if (isNew) {
-      const dtReal = Math.max(1/60, tSec - lastDetectT);
       if (p && rawA) { velA = { x:(p.grip.x-rawA.x)/dtReal, y:(p.grip.y-rawA.y)/dtReal }; rawA = {...p.grip}; }
       if (q && rawB) { velB = { x:(q.grip.x-rawB.x)/dtReal, y:(q.grip.y-rawB.y)/dtReal }; rawB = {...q.grip}; }
       lastDetectT = tSec;
+      if (p) AsizeVal = AsizeF(p.sizePx, tSec);
+      if (q) BsizeVal = BsizeF(q.sizePx, tSec);
     }
     if (p && A) { rollA = lerpA(rollA, p.roll, Math.min(1, dt*8)); seenA = tSec; }
     if (q && B) { rollB = lerpA(rollB, q.roll, Math.min(1, dt*8)); seenB = tSec; }
   }
+  // 4 điểm ngón thật cho HÌNH DÁNG dải (độc lập với A/B đang lái state machine mở/đóng) —
+  // chạy trackPoint() MỖI khung kể cả lúc pair=null (p/q=null), để tiếp tục ngoại suy+lọc
+  // trong lúc mất khung ngắn hạn, y hệt cách A/B tự chạy tiếp bên dưới.
+  trackPoint(AthumbPt, p ? p.thumbPx : null, isNew, dt, dtReal, tSec);
+  trackPoint(AindexPt, p ? p.indexPx : null, isNew, dt, dtReal, tSec);
+  trackPoint(BthumbPt, q ? q.thumbPx : null, isNew, dt, dtReal, tSec);
+  trackPoint(BindexPt, q ? q.indexPx : null, isNew, dt, dtReal, tSec);
   // ngoại suy vị trí RAW theo vận tốc MỖI khung (kể cả khung không có detect mới), rồi mới
   // đưa qua OneEuro để mượt nhiễu nhỏ -> chuyển động liên tục thay vì bậc thang.
   if (A && rawA) {
@@ -692,6 +742,8 @@ function updateRibbon(dt){
     hadHands = false; A = B = null; ambient = []; pairEverClose = false; immersion = 0; wasFullyOpen = false;
     rawA = rawB = null; velA = {x:0,y:0}; velB = {x:0,y:0};
     fA = { x:OneEuro(2.2,0.9,1.0), y:OneEuro(2.2,0.9,1.0) }; fB = { x:OneEuro(2.2,0.9,1.0), y:OneEuro(2.2,0.9,1.0) };
+    resetPt(AthumbPt); resetPt(AindexPt); resetPt(BthumbPt); resetPt(BindexPt);
+    AsizeVal = 45; BsizeVal = 45; membraneSway = 0;
   }
   for (const s of sparks){ s.life -= dt*1.8; s.x += s.vx*dt*60; s.y += s.vy*dt*60; }
   sparks = sparks.filter(s=>s.life>0);
@@ -708,6 +760,10 @@ function updateRibbon(dt){
   ambient = ambient.filter(p=>p.life>0);
 
   updateChannels(dt);
+  // "vải mềm": dao động sống ngay cả lúc đứng yên (biên độ nền nhỏ, không bao giờ phẳng lì —
+  // cùng triết lý với turb ở shader), biên độ lớn hơn khi tay đang động thật.
+  const swayTarget = Math.sin(tSec*1.7) * Math.min(1, CH.handSpeed*8 + 0.15);
+  membraneSway = lerpA(membraneSway, swayTarget, Math.min(1, dt*4));
 }
 
 const radCache = {};
@@ -787,28 +843,51 @@ function drawFaceMask(alphaMul){
 }
 
 const SLICES = 48;
+// Leon: "khô cứng như 2D... cần khớp theo TỪNG NGÓN, chạy trong chiều không gian 3D" — dựng
+// lại hình dải từ 4 điểm ngón THẬT (cái+trỏ mỗi tay, không gộp) + phối cảnh gần-to-xa-nhỏ theo
+// độ lớn biểu kiến của tay (xem ghi chú ở mkPt) + "vải mềm" uốn nhẹ theo membraneSway, thay vì
+// 1 trục A-B ± bề rộng đồng đều như trước. A/B (grip) vẫn giữ nguyên cho state machine mở/đóng.
+const WIDTH_BOOST = 2.6;   // khoảng ngón cái-trỏ thật (~60-150px đo trên video ref) nhân lên
+                            // cho gần cỡ dải cũ (maxH cũ ~130-210px) -- dải vẫn PHẢN ỨNG đúng
+                            // theo khoảng ngón thật, chỉ là không vẽ đúng-bằng-pixel-vật-lý.
 function drawRibbon(){
   if (alive < 0.02 || !A || !B) return;
   const w = WORLDS[worldIdx];
-  const dx=B.x-A.x, dy=B.y-A.y;
+  const haveA = AthumbPt.pos && AindexPt.pos, haveB = BthumbPt.pos && BindexPt.pos;
+  const midA = haveA ? { x:(AthumbPt.pos.x+AindexPt.pos.x)/2, y:(AthumbPt.pos.y+AindexPt.pos.y)/2 } : A;
+  const midB = haveB ? { x:(BthumbPt.pos.x+BindexPt.pos.x)/2, y:(BthumbPt.pos.y+BindexPt.pos.y)/2 } : B;
+  const dx=midB.x-midA.x, dy=midB.y-midA.y;
   const len = Math.max(Math.hypot(dx,dy), 60*DPR);
   const ang = Math.atan2(dy,dx);
-  // độ nhúm cái-trỏ (kênh CH.pinchOpen) điều khiển ĐỘ RỘNG dải một cách LIÊN TỤC —
-  // đo trên video ref: p10=0.67 (nhúm) .. p90=2.28 (xoè) -> map tuyến tính có clamp sang
-  // hệ số 0.55..1.60. Tách hẳn khỏi vị trí neo (đã cố định 65/35 để hết "mông lung") nên
-  // nhúm/nhả không làm neo trôi, chỉ đổi độ dày dải — đúng ý "1 chuỗi motion" liên tục.
-  const pinchT = Math.max(0, Math.min(1, (CH.pinchOpen - 0.67) / (2.28 - 0.67)));
-  const pinchScale = 0.55 + pinchT * 1.05;
-  const maxH = Math.min(Math.max(len*0.42, 90*DPR), H*0.42) * pinchScale;
-  const mx=(A.x+B.x)/2, my=(A.y+B.y)/2;
+  const clamp01 = v => Math.max(0, Math.min(1, v));
+  // độ nhúm cái-trỏ THẬT của MỖI tay (không còn 1 hệ số trung bình áp chung 2 đầu như bản cũ)
+  // -- mỗi đầu dải tự co/nở theo đúng tay đó, cộng biên an toàn min/max phòng nhiễu tracking.
+  const rawWA = haveA ? Math.hypot(AthumbPt.pos.x-AindexPt.pos.x, AthumbPt.pos.y-AindexPt.pos.y) : null;
+  const rawWB = haveB ? Math.hypot(BthumbPt.pos.x-BindexPt.pos.x, BthumbPt.pos.y-BindexPt.pos.y) : null;
+  const oldMaxH = Math.min(Math.max(len*0.42, 90*DPR), H*0.42);   // dự phòng khi 4 điểm chưa kịp bind (vừa mở)
+  const wA = Math.min(Math.max((rawWA ?? oldMaxH/1.3) * WIDTH_BOOST, 40*DPR), H*0.5);
+  const wB = Math.min(Math.max((rawWB ?? oldMaxH/1.3) * WIDTH_BOOST, 40*DPR), H*0.5);
+  // phối cảnh gần-to-xa-nhỏ: tay nào trông TO hơn (AsizeVal/BsizeVal, đo bằng px thật) là tay
+  // gần camera hơn -- rõ nét hơn cả w lẫn glow ở đầu đó. Kẹp biên [0.6,1.7] để nhiễu tracking
+  // không kéo méo quá đà (đo video ref: 2 tay cùng khung lệch nhau tới 110% so với TB).
+  const avgSize = Math.max(1, (AsizeVal+BsizeVal)/2);
+  const scaleA = Math.max(0.6, Math.min(1.7, AsizeVal/avgSize));
+  const scaleB = Math.max(0.6, Math.min(1.7, BsizeVal/avgSize));
+  const mx=(midA.x+midB.x)/2, my=(midA.y+midB.y)/2;
   const sw = len/SLICES;
-  const top=[], bot=[], cs=[];
+  const top=[], bot=[], cs=[], halfW=[];
   for (let i=0;i<=SLICES;i++){
-    const c = Math.cos(lerpA(rollA, rollB, i/SLICES));
-    const hh = Math.abs(c)*maxH/2;
-    cs.push(c);
+    const s = i/SLICES;
+    const c = Math.cos(lerpA(rollA, rollB, s));
+    const localScale = lerpA(scaleA, scaleB, s);
+    const baseHalfW = lerpA(wA, wB, s)/2 * localScale;   // độ rộng thật (chưa vặn theo roll) -- dùng cho spark, không tụt về 0 ở điểm xoắn
+    const hh = Math.abs(c) * baseHalfW;
+    cs.push(c); halfW.push(baseHalfW);
     const x = -len/2 + i*sw;
-    top.push({x, y:-hh}); bot.push({x, y:hh});
+    // "vải mềm": lệch vuông góc trục dài, mạnh nhất ở giữa (sin(s*PI)), tắt hẳn ở 2 đầu (neo
+    // đúng ngón tay thật, không trôi khỏi vị trí ngón) -- membraneSway tự dao động sống.
+    const bulge = Math.sin(s*Math.PI) * membraneSway * len * 0.05;
+    top.push({x, y:-hh + bulge}); bot.push({x, y:hh + bulge});
   }
   // --- ô cửa: nội dung giữ nguyên hệ trục màn hình, dải chỉ xén ---
   ctx.save();
@@ -835,8 +914,14 @@ function drawRibbon(){
   let i0=0;
   while (i0 < SLICES){
     let i1=i0; while (i1<SLICES && (cs[i1]<0)===(cs[i0]<0)) i1++;
-    if (cs[i0]<0){ ctx.globalAlpha = alive*0.45; ctx.fillStyle='#000';
-      ctx.fillRect(-len/2+i0*sw, -maxH, (i1-i0)*sw, maxH*2); }
+    if (cs[i0]<0){
+      // độ rộng giờ đổi dọc theo dải (phối cảnh + mỗi tay 1 độ nhúm riêng) -- lấy đúng biên
+      // trên/dưới thật của ĐOẠN này thay vì 1 hằng số maxH chung như bản cũ.
+      let yT=Infinity, yB=-Infinity;
+      for (let k=i0;k<=i1;k++){ yT=Math.min(yT, top[k].y); yB=Math.max(yB, bot[k].y); }
+      ctx.globalAlpha = alive*0.45; ctx.fillStyle='#000';
+      ctx.fillRect(-len/2+i0*sw, yT, (i1-i0)*sw, yB-yT);
+    }
     i0=i1;
   }
   ctx.globalAlpha=1; ctx.restore();
@@ -850,7 +935,7 @@ function drawRibbon(){
       pts.forEach((p,i)=> i?ctx.lineTo(p.x,p.y):ctx.moveTo(p.x,p.y)); ctx.stroke(); }
   }
   for (let i=1;i<=SLICES;i++) if (cs[i-1]*cs[i] < 0){
-    const gx=-len/2+i*sw, r=maxH*0.22;
+    const gx=-len/2+i*sw, r=halfW[i]*0.44;   // dùng độ rộng THẬT tại đây, không tụt về 0 như hh (hh~0 đúng tại điểm xoắn)
     ctx.globalAlpha = alive*0.55; ctx.drawImage(radial(w.spark), gx-r, -r, r*2, r*2);
   }
   ctx.globalAlpha=1; ctx.globalCompositeOperation='source-over'; ctx.restore();
