@@ -197,9 +197,13 @@ void main(){
   vec2 flameUv = uv - vec2(0.0, uTime*0.22);                // cuộn LÊN, không cuộn ngang như warp() nền
   float flameNoise = fbm(warp(flameUv*5.0, uTime*1.6, uTurb*1.4 + 0.4));
   float flameFlicker = 0.5 + 0.5*sin(uTime*9.0 + flameNoise*8.0);
+  // Leon báo lag trên điện thoại -- 5 tap thay vì 7 (mỗi tap là 1 lần đọc texture uMask/pixel,
+  // chạy trên TOÀN BỘ độ phân giải pass FRESH mỗi khung) vẫn đủ mượt cho hiệu ứng tém lửa,
+  // giảm ~30% chi phí vòng dò này mà không đổi hình dạng/độ mạnh tổng thể (đã bù bằng cách
+  // tăng bước nhảy mỗi tap, giữ nguyên tầm với ~10% chiều cao khung).
   float flameReach = 0.0;
-  for (int fi = 1; fi <= 7; fi++) {
-    float ft = float(fi) / 7.0;
+  for (int fi = 1; fi <= 5; fi++) {
+    float ft = float(fi) / 5.0;
     float sway = (flameNoise - 0.5) * 0.06 * ft;
     vec2 samplePos = uv + vec2(sway, ft * 0.10);              // +y = xuống dưới = về phía người thật
     float m = texture(uMask, samplePos).r;
@@ -1085,7 +1089,7 @@ function handInput(){
 }
 
 // ===================== Vòng chạy =====================
-let last = performance.now(), tsCounter = 0;
+let last = performance.now(), tsCounter = 0, faceFrameCounter = 0;
 let hasNewFrame = true, lastVFC = 0;
 if (video.requestVideoFrameCallback) {
   const tick = () => { hasNewFrame = true; lastVFC = performance.now();
@@ -1112,14 +1116,21 @@ function frame(now){
     readHands(hand.detectForVideo(handInput(), ++tsCounter));
     // tách người + mặt chỉ chạy khi dải đang mở/sắp mở — mặt nạ chỉ hiện được lúc đó nên
     // detect sớm hơn cũng vô ích. Face ~7,5ms/lần (đo hồi kiến trúc v2) — ăn phần lớn dư
-    // địa khung hình còn lại, nhưng cả 3 model cộng dồn vẫn dưới ngân sách 33,3ms @30fps.
+    // địa khung hình còn lại, nhưng cả 3 model cộng dồn vẫn dưới ngân sách 33,3ms @30fps
+    // TRÊN MÁY LEON — Leon báo lag trên điện thoại (máy yếu hơn). Mặt nạ là hiệu ứng trang
+    // trí, không cần bám khít từng khung như tay/dải -- hạ nhịp chạy face model còn 1/2 (mỗi
+    // khung fresh thứ 2), giữa các khung không chạy thì faceLm giữ nguyên vị trí cũ (đứng yên
+    // 1 khung, không giật, vì mặt di chuyển chậm hơn nhiều so với 60fps).
     if (alive > 0.02 || hands.length >= 2) {
       seg.segmentForVideo(src, ++tsCounter, r => {
         const mk = r.confidenceMasks && r.confidenceMasks[0];
         if (mk) maskTex = mk.getAsWebGLTexture();
       });
     }
-    if (alive > 0.02) readFace(face.detectForVideo(src, ++tsCounter)); else faceLm = null;
+    if (alive > 0.02) {
+      faceFrameCounter++;
+      if (faceFrameCounter % 2 === 0) readFace(face.detectForVideo(src, ++tsCounter));
+    } else { faceLm = null; faceFrameCounter = 0; }
   } catch(e){ /* một khung lỗi thì bỏ qua, không giết vòng chạy */ }
 
   updateRibbon(dt);
@@ -1162,8 +1173,12 @@ function frame(now){
     applyWorld();
     await initModels();
     say('đang xin quyền camera…');
+    // Leon báo lag trên điện thoại (laptop thì "không quá lag") -- 1920x1080 là 2,07 triệu
+    // px/khung chạy xuyên suốt cả pipeline 6-pass + shader lửa tóc + beauty MỖI khung; hạ
+    // xuống 1280x720 cắt còn 56% số px đó, MÀ VẪN GIỮ NGUYÊN aspectRatio 16:9 nên góc nhìn
+    // rộng (fix trước đó) không mất — chỉ giảm độ chi tiết/số px xử lý, không giảm khung hình.
     const stream = await navigator.mediaDevices.getUserMedia({
-      video: { width:{ideal:1920}, height:{ideal:1080}, aspectRatio:{ideal:16/9},
+      video: { width:{ideal:1280}, height:{ideal:720}, aspectRatio:{ideal:16/9},
                facingMode:'user' }, audio:false });
     video.srcObject = stream;
     await video.play();
