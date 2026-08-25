@@ -41,9 +41,12 @@
   <div id="hint">Đang bật camera…</div>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation/selfie_segmentation.js"></script>
+<!-- audit: 3 script trước đây không ghim version (kéo @latest) -- trang này giữ 1 luồng camera
+     sống, 1 bản CDN đổi đột ngột (kể cả bị compromise) là ảnh hưởng thẳng ngay lúc đang chạy.
+     Ghim đúng bản mới nhất hiện tại, cùng kiểu ghim @1.0.1 mà band.html đã làm với tasks-vision. -->
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1675466862/camera_utils.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation@0.1.1675465747/selfie_segmentation.js"></script>
 <script>
 const video  = document.getElementById('video');
 const canvas = document.getElementById('canvas');
@@ -394,7 +397,7 @@ function togglePhase() {
 
 function ensureSeg() {
   if (seg) return;
-  seg = new SelfieSegmentation({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation/${f}` });
+  seg = new SelfieSegmentation({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation@0.1.1675465747/${f}` });
   seg.setOptions({ modelSelection: 1 }); // model xịn: cắt nền sạch, không lọt tường nhà
   seg.onResults(r => {
     personCv.width = r.image.width; personCv.height = r.image.height;
@@ -741,7 +744,7 @@ function loop(now) {
 requestAnimationFrame(loop);
 
 // ================= MediaPipe =================
-const mpHands = new Hands({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}` });
+const mpHands = new Hands({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${f}` });
 mpHands.setOptions({ maxNumHands: 2, modelComplexity: 0, minDetectionConfidence: 0.6, minTrackingConfidence: 0.6 });
 mpHands.onResults(res => {
   const prev = { ...prevGesture };
