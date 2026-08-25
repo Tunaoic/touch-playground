@@ -385,8 +385,9 @@ const CH = {
   ribbonLen: 0,      // độ dài dải hiện tại (px), 0 khi đóng
   handSpeed: 0,      // tốc độ tay đã lọc mượt, vô đơn vị (chuẩn hoá theo bề rộng màn hình)
   handAccel: 0,      // độ giật tăng tốc tức thời — chỉ dương, dùng cho hiệu ứng "kick"
+  pinchOpen: 1,       // độ nhúm cái-trỏ TRUNG BÌNH 2 tay, đã lọc mượt — 1 = mức trung tính
 };
-const chLag = { handSpeed: OneEuro(0.8, 0.9, 1.0) };   // lọc riêng kênh tốc độ, tách khỏi lọc vị trí của fA/fB
+const chLag = { handSpeed: OneEuro(0.8, 0.9, 1.0), pinch: OneEuro(1.5, 0.6, 1.0) };   // lọc riêng từng kênh, tách khỏi lọc vị trí của fA/fB
 let chPrevMid = null, chPrevSpeed = 0;
 function updateChannels(dt){
   CH.time = tSec;
@@ -402,6 +403,10 @@ function updateChannels(dt){
   } else {
     chPrevMid = null;
     CH.ribbonLen = 0; CH.handSpeed = chLag.handSpeed(0, tSec); CH.handAccel = 0;
+  }
+  if (hands.length) {
+    const avgPinch = hands.reduce((s,h)=>s+h.pinchNorm, 0) / hands.length;
+    CH.pinchOpen = chLag.pinch(avgPinch, tSec);
   }
 }
 
@@ -425,7 +430,10 @@ function readHands(res){
     const pw = Math.hypot(lm[5].x-lm[17].x, lm[5].y-lm[17].y);
     const c = Math.max(0, Math.min(1, (pw/hl)/0.95));
     const sign = ((lm[5].z || 0) - (lm[17].z || 0)) >= 0 ? 1 : -1;
-    hands.push({ grip:{ x:(1-tip.x)*W, y:tip.y*H }, thumbPx, indexPx,
+    // độ nhúm cái-trỏ CHUẨN HOÁ theo chiều dài bàn tay -> không phụ thuộc khoảng cách tới
+    // camera. Đo trên video ref: dao động 0.14 (nhúm chặt) .. 3.3 (xoè hết cỡ), p10=0.67 p90=2.28.
+    const pinchNorm = Math.hypot(lm[4].x-lm[8].x, lm[4].y-lm[8].y) / hl;
+    hands.push({ grip:{ x:(1-tip.x)*W, y:tip.y*H }, thumbPx, indexPx, pinchNorm,
                  roll: Math.acos(Math.max(-1, Math.min(1, c*sign))) });
   }
 }
@@ -532,7 +540,13 @@ function drawRibbon(){
   const dx=B.x-A.x, dy=B.y-A.y;
   const len = Math.max(Math.hypot(dx,dy), 60*DPR);
   const ang = Math.atan2(dy,dx);
-  const maxH = Math.min(Math.max(len*0.42, 90*DPR), H*0.42);
+  // độ nhúm cái-trỏ (kênh CH.pinchOpen) điều khiển ĐỘ RỘNG dải một cách LIÊN TỤC —
+  // đo trên video ref: p10=0.67 (nhúm) .. p90=2.28 (xoè) -> map tuyến tính có clamp sang
+  // hệ số 0.55..1.60. Tách hẳn khỏi vị trí neo (đã cố định 65/35 để hết "mông lung") nên
+  // nhúm/nhả không làm neo trôi, chỉ đổi độ dày dải — đúng ý "1 chuỗi motion" liên tục.
+  const pinchT = Math.max(0, Math.min(1, (CH.pinchOpen - 0.67) / (2.28 - 0.67)));
+  const pinchScale = 0.55 + pinchT * 1.05;
+  const maxH = Math.min(Math.max(len*0.42, 90*DPR), H*0.42) * pinchScale;
   const mx=(A.x+B.x)/2, my=(A.y+B.y)/2;
   const sw = len/SLICES;
   const top=[], bot=[], cs=[];
